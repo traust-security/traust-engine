@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from itertools import chain
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,10 @@ class IngestReport:
     rejected: int = 0
     missing: int = 0
     unregistered: dict[str, int] = field(default_factory=dict)
+    #: Lane artifacts whose repository matches no corpus subject. Counted
+    #: rather than bound to an invented subject: outside the declared
+    #: corpus means no owner and no denominator.
+    unmatched_lane: dict[str, int] = field(default_factory=dict)
     subjects: int = 0
     by_family: dict[str, int] = field(default_factory=dict)
     reasons: dict[str, int] = field(default_factory=dict)
@@ -112,6 +117,95 @@ def _bindings(family: str, scope: str, subject: str) -> Binding:
     if family == "layer":
         return Binding(scope_id=scope, layer_id=f"corpus:layer:{subject}")
     return Binding(scope_id=scope, subject_id=subject, run_id=f"corpus:run:{subject}")
+
+
+#: Cross-cutting lanes: artifacts that live in their OWN tree, keyed by
+#: repository rather than filed beside a subject's reports. They still
+#: belong to a corpus subject -- the join is the repository URL, which the
+#: corpus registry already carries for every subject.
+LANE_FAMILY_BY_SUFFIX: dict[str, dict[str, str]] = {
+    "pqc": {
+        "-pqc-readiness.json": "pqc-readiness",
+        "-pqc-facts.json": "pqc-facts",
+        "-pqc-blockers.json": "pqc-blockers",
+    },
+}
+
+
+def _canonical_repo_url(url: str | None) -> str | None:
+    """Normalise a repo URL so two spellings of one repo match.
+
+    Trailing slash, a `.git` suffix and case all vary between the corpus
+    registry and a lane artifact's metadata. Measured across the live
+    corpus, normalising these three gives a 100% join (3,159 of 3,159).
+    """
+    if not url:
+        return None
+    return url.strip().rstrip("/").removesuffix(".git").lower() or None
+
+
+def plan_lanes(
+    results: Path, cfg: CorpusConfig, resolution: Any, lanes: list[str] | None = None
+) -> Iterator[tuple]:
+    """Yield (family, scope, subject, path) for cross-cutting lane artifacts.
+
+    The subject and scope come from the SAME resolution the registry is
+    built from, never from a second walk -- a lane that guessed its own
+    ownership would be a second answer to "who owns this", which is the
+    disagreement this whole projection exists to remove.
+
+    A lane artifact whose repository matches no corpus subject is reported
+    rather than silently bound to an invented subject: it means the repo is
+    outside the declared corpus, so it has no owner and no denominator.
+    """
+    by_url: dict[str, Any] = {}
+    for record in resolution.records:
+        url = _canonical_repo_url(getattr(record, "repo_url", None))
+        if url and url not in by_url:
+            by_url[url] = record
+
+    for lane, suffixes in LANE_FAMILY_BY_SUFFIX.items():
+        if lanes is not None and lane not in lanes:
+            continue
+        root = results / lane
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob("*/*.json")):
+            # `_manifest` is corpus bookkeeping, not subject artifacts. It
+            # holds retired-duplicate-slugs among other things, and
+            # ingesting those would double-count 20 repos. One level deep
+            # already excludes them; naming it keeps that deliberate rather
+            # than incidental on the next glob change.
+            if "_manifest" in path.parts:
+                continue
+            family = next(
+                (f for suffix, f in suffixes.items() if path.name.endswith(suffix)), None
+            )
+            if family is None:
+                continue
+            try:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                yield ("__unreadable__", lane, path.name, None)
+                continue
+            # Where the repository lives differs BY FAMILY: pqc-readiness
+            # nests it under metadata, pqc-facts carries it at the top
+            # level. Reading only one shape silently matched nothing for
+            # the other -- measured, 3,246 facts artifacts unmatched.
+            url = _canonical_repo_url(
+                (document.get("metadata") or {}).get("repository")
+                or document.get("repository")
+            )
+            record = by_url.get(url or "")
+            if record is None:
+                yield ("__unmatched_lane__", lane, path.name, None)
+                continue
+            try:
+                scope = cfg.scope_for(record.tree)
+            except KeyError:
+                yield ("__unregistered__", record.tree, repo_key(record), None)
+                continue
+            yield family, scope, repo_key(record), path
 
 
 def plan(results: Path, cfg: CorpusConfig, trees: list[str] | None = None) -> Iterator[tuple]:
@@ -204,11 +298,19 @@ def ingest_tree(
 ) -> IngestReport:
     """Ingest every resolvable artifact. Reports rejections, never hides them."""
     report = IngestReport()
+    # ONE resolution, shared by the registry, the tree walk and the lanes.
+    # Resolving separately per consumer is how two of them come to disagree
+    # about what the corpus is.
+    resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
     if not dry_run:
         report.subjects = ingest_registry(store, results, cfg, trees)
-    for family, scope, subject, path in plan(results, cfg, trees):
+    planned = chain(plan(results, cfg, trees), plan_lanes(results, cfg, resolution))
+    for family, scope, subject, path in planned:
         if family == "__unregistered__":
             report.unregistered[scope] = report.unregistered.get(scope, 0) + 1
+            continue
+        if family in ("__unmatched_lane__", "__unreadable__"):
+            report.unmatched_lane[scope] = report.unmatched_lane.get(scope, 0) + 1
             continue
         if not path.exists():
             report.missing += 1
@@ -252,6 +354,13 @@ def render(report: IngestReport) -> str:
         )
         for tree, count in sorted(report.unregistered.items(), key=lambda kv: -kv[1]):
             lines.append(f"  {count:6}  {tree}")
+    if report.unmatched_lane:
+        lines.append(
+            "SKIPPED -- lane artifact whose repository is not a corpus "
+            "subject, so it has no owner:"
+        )
+        for lane, count in sorted(report.unmatched_lane.items(), key=lambda kv: -kv[1]):
+            lines.append(f"  {count:6}  {lane}")
     if report.reasons:
         lines.append("rejections:")
         for reason, count in sorted(report.reasons.items(), key=lambda kv: -kv[1]):
