@@ -78,6 +78,18 @@ FAMILY_BY_REF: dict[str, dict[str, str]] = {
     },
 }
 
+#: Families whose artifact sits beside a ref the resolver already returns,
+#: at the same base with a different suffix. Derived rather than added to
+#: ReportRecord: report_store rebuilds that record from findings.db
+#: FIELD-FOR-FIELD, so a new field forces a new findings.db column -- and a
+#: file path is resolver bookkeeping, not something the contract schema
+#: defines. The contract's expression of a threat model is the `threat`
+#: projection and the threat_current view.
+DERIVED_BY_SUFFIX: dict[str, tuple[str, str, str]] = {
+    # family: (ref the resolver returns, its suffix, the suffix to swap in)
+    "threat-model": ("threat_model", "-threat-model.md", "-threat-model.json"),
+}
+
 
 @dataclass
 class IngestReport:
@@ -285,6 +297,13 @@ def plan(results: Path, cfg: CorpusConfig, trees: list[str] | None = None) -> It
             # this reports them the same way rather than guessing a scope.
             yield ("__unregistered__", record.tree, subject, None)
             continue
+        for family, (ref_name, old_suffix, new_suffix) in DERIVED_BY_SUFFIX.items():
+            ref = getattr(record, ref_name, None)
+            if not ref or not str(ref).endswith(old_suffix):
+                continue
+            candidate = Path(str(ref)[: -len(old_suffix)] + new_suffix)
+            if candidate.is_file():
+                yield family, scope, subject, candidate
         for ref_name, by_kind in FAMILY_BY_REF.items():
             ref = getattr(record, ref_name, None)
             if not ref:
