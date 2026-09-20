@@ -448,3 +448,101 @@ def test_canonical_product_named_after_repo_not_flagged(tmp_path):
     _audit(ar / "findings" / "clowder" / "clowder", "clowder")
     res = corpus.resolve(ar, cfg)
     assert not [w for w in res.warnings if "nested duplicate report dir" in w]
+
+
+# ---------------------------------------------------------------------------
+# one cumulative report, one owner
+# ---------------------------------------------------------------------------
+
+
+def _dual_audit_tree(tmp_path, cumulative: dict) -> tuple[Path, Path]:
+    """A directory holding BOTH a code audit and a cloud-config audit.
+
+    The real layout for the three such directories in the live corpus.
+    Both audits share one `<base>-findings-current.json`, because the
+    companion filename carries no kind marker.
+    """
+    cfg_path = _write_config(tmp_path, FIXTURE_CONFIG)
+    ar = tmp_path / "analysis-results"
+    d = ar / "findings" / "prodA" / "dual"
+    _audit(d, "dual", md=False)
+    (d / "dual-cloud-config-audit.json").write_text(
+        json.dumps({"metadata": {}, "findings": []}), encoding="utf-8"
+    )
+    (d / "dual-findings-current.json").write_text(json.dumps(cumulative), encoding="utf-8")
+    return cfg_path, ar
+
+
+def test_shared_cumulative_goes_to_the_cloud_config_record_only(tmp_path):
+    """Both kinds claiming one findings-current double-counts its findings.
+
+    Measured on the live corpus before this: 181 duplicated open rows
+    across three directories, the SAME fingerprints under both repo_keys,
+    because every consumer walks records and each record pointed at the
+    same file.
+    """
+    cfg_path, ar = _dual_audit_tree(
+        tmp_path,
+        # no executive_summary -> a cloud-config restatement by contract
+        {"title": "t", "metadata": {}, "summary": {}, "findings": [], "disposition_summary": {}},
+    )
+    res = corpus.resolve(ar, corpus.load_config(cfg_path))
+    dual = {r.report_kind: r for r in res.records if r.base == "dual"}
+    assert set(dual) == {"code-audit", "cloud-config"}, "both audits still resolve"
+    assert dual["cloud-config"].findings_current is not None
+    assert dual["code-audit"].findings_current is None
+    assert dual["code-audit"].preferred == "audit_json"
+    assert dual["cloud-config"].preferred == "findings_current"
+
+
+def test_shared_cumulative_goes_to_the_code_record_when_it_is_a_report(tmp_path):
+    """The discriminator is the contract, and it cuts both ways.
+
+    `report.schema.json` requires `executive_summary`;
+    `cloud-config-findings-current.schema.json` sets
+    `additionalProperties: false` and never declares it.
+    """
+    cfg_path, ar = _dual_audit_tree(
+        tmp_path,
+        {"title": "t", "metadata": {}, "executive_summary": "x", "findings": []},
+    )
+    res = corpus.resolve(ar, corpus.load_config(cfg_path))
+    dual = {r.report_kind: r for r in res.records if r.base == "dual"}
+    assert dual["code-audit"].findings_current is not None
+    assert dual["cloud-config"].findings_current is None
+    assert dual["cloud-config"].preferred == "audit_json"
+
+
+def test_unreadable_shared_cumulative_warns_instead_of_picking(tmp_path):
+    """No owner is better than a random one.
+
+    Silently assigning it would make the duplication invisible again,
+    which is the failure this whole change exists to end.
+    """
+    cfg_path, ar = _dual_audit_tree(tmp_path, {})
+    (ar / "findings" / "prodA" / "dual" / "dual-findings-current.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+    res = corpus.resolve(ar, corpus.load_config(cfg_path))
+    dual = {r.report_kind: r for r in res.records if r.base == "dual"}
+    assert all(r.findings_current is not None for r in dual.values()), "left as-is"
+    assert any("no resolvable owner" in w for w in res.warnings)
+
+
+def test_single_kind_directory_is_untouched(synthetic):
+    """8,601 of 8,604 records must see no change at all."""
+    ar, cfg = synthetic
+    res = corpus.resolve(ar, cfg)
+    repo1 = [
+        r
+        for r in res.records
+        if r.base == "repo1" and r.report_kind == "code-audit" and r.product == "prodA"
+    ]
+    assert len(repo1) == 1
+    assert repo1[0].findings_current is not None
+    assert repo1[0].preferred == "findings_current"
+    # the container audit shares the directory but not the base, so its
+    # own cumulative report is still its own
+    container = [r for r in res.records if r.report_kind == "container-audit"]
+    assert len(container) == 1
+    assert container[0].findings_current is not None

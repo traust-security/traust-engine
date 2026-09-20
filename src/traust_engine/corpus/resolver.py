@@ -454,6 +454,11 @@ def _walk_tree(
                     }
                 )
 
+        # Accumulated per DIRECTORY, not appended straight to the
+        # resolution: a base can produce one record per audit kind, and the
+        # kind-less companions beside them need one owner chosen before the
+        # records escape. See _claim_shared_cumulative.
+        dir_records: list[ReportRecord] = []
         for kind, json_suffix, md_suffix in REPORT_KINDS:
             json_bases, md_bases = set(), set()
             for fn in filenames:
@@ -489,7 +494,7 @@ def _walk_tree(
                 rec_json_suffix, rec_md_suffix = json_suffix, md_suffix
 
             for base in sorted(json_bases | md_bases):
-                res.records.append(
+                dir_records.append(
                     _record(
                         dirpath,
                         base,
@@ -504,6 +509,76 @@ def _walk_tree(
                         md_suffix=rec_md_suffix,
                     )
                 )
+
+        _claim_shared_cumulative(dir_records, res)
+        res.records.extend(dir_records)
+
+
+def _cumulative_kind(path: Path) -> str | None:
+    """Which audit kind wrote this cumulative report, or None if unreadable.
+
+    The two families are separated by the CONTRACT, not by a guess:
+    `report.schema.json` requires `executive_summary`, and
+    `cloud-config-findings-current.schema.json` sets
+    `additionalProperties: false` without declaring it. A document
+    carrying it cannot be a cloud-config restatement, and one lacking it
+    cannot be a report. Returning None on an unreadable file is
+    deliberate -- the caller leaves the ambiguity in place and warns
+    rather than picking an owner at random.
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    return "code-audit" if "executive_summary" in document else "cloud-config"
+
+
+def _claim_shared_cumulative(records: list[ReportRecord], res: Resolution) -> None:
+    """One cumulative report, one owner.
+
+    A directory holding both a code audit and a cloud-config audit for
+    the same base yields one ReportRecord per KIND -- correct, because
+    the two units must never blend. But the companions beside them carry
+    no kind marker in their filename (`<base>-findings-current.json`),
+    so `_record` hands the same file to both records, and every consumer
+    that walks records then counts those findings twice. Measured on the
+    live corpus before this: 181 duplicated open rows across three
+    directories, the same fingerprints under both repo_keys.
+
+    Container audits do not hit this -- the walk keeps `-container-audit`
+    inside `base`, so their companions never collide. cloud-config never
+    got that treatment because its audits historically sat in a tree of
+    their own, with no code audit beside them.
+
+    Only the ambiguous case is touched: a base with a single record keeps
+    exactly what it had.
+    """
+    by_base: dict[str, list[ReportRecord]] = {}
+    for record in records:
+        by_base.setdefault(record.base, []).append(record)
+    for base, group in sorted(by_base.items()):
+        if len(group) < 2:
+            continue
+        path = next((r.findings_current for r in group if r.findings_current), None)
+        if path is None:
+            continue
+        owner = _cumulative_kind(Path(path))
+        kinds = sorted({r.report_kind for r in group})
+        if owner is None or owner not in kinds:
+            res.warnings.append(
+                f"shared cumulative report with no resolvable owner: {path} "
+                f"is claimed by {len(group)} records ({', '.join(kinds)}) and "
+                f"its shape matches none of them — every consumer counts its "
+                f"findings once per record until this is reconciled"
+            )
+            continue
+        for record in group:
+            if record.report_kind == owner:
+                continue
+            record.findings_current = None
+            record.preferred = "audit_json" if record.audit_json else "audit_md_only"
 
 
 def _record(
