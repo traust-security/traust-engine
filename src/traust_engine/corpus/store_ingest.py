@@ -119,16 +119,44 @@ def _bindings(family: str, scope: str, subject: str) -> Binding:
     return Binding(scope_id=scope, subject_id=subject, run_id=f"corpus:run:{subject}")
 
 
+@dataclass(frozen=True)
+class LaneSpec:
+    """How one cross-cutting lane is shaped.
+
+    Lanes differ in two ways that matter and cannot be guessed:
+
+      glob   pqc files one directory deep, validations up to three
+             (core-ocp-4.12/aws/<component>/). Globbing too shallow
+             silently drops 653 validations; too deep picks up retired
+             duplicates under _manifest.
+      link   how the artifact names its subject. pqc carries a repository
+             URL; a validation names the audit REPORT it validated, and
+             has no repository field at all.
+    """
+
+    glob: str
+    families: dict[str, str]
+    link: str  # "repo_url" | "source_report"
+
+
 #: Cross-cutting lanes: artifacts that live in their OWN tree, keyed by
-#: repository rather than filed beside a subject's reports. They still
-#: belong to a corpus subject -- the join is the repository URL, which the
-#: corpus registry already carries for every subject.
-LANE_FAMILY_BY_SUFFIX: dict[str, dict[str, str]] = {
-    "pqc": {
-        "-pqc-readiness.json": "pqc-readiness",
-        "-pqc-facts.json": "pqc-facts",
-        "-pqc-blockers.json": "pqc-blockers",
-    },
+#: repository or by the report they derive from, rather than filed beside a
+#: subject's reports. They still belong to a corpus subject.
+LANE_SPECS: dict[str, LaneSpec] = {
+    "pqc": LaneSpec(
+        glob="*/*.json",
+        families={
+            "-pqc-readiness.json": "pqc-readiness",
+            "-pqc-facts.json": "pqc-facts",
+            "-pqc-blockers.json": "pqc-blockers",
+        },
+        link="repo_url",
+    ),
+    "validations": LaneSpec(
+        glob="**/*.json",
+        families={"-validation.json": "validation"},
+        link="source_report",
+    ),
 }
 
 
@@ -144,6 +172,54 @@ def _canonical_repo_url(url: str | None) -> str | None:
     return url.strip().rstrip("/").removesuffix(".git").lower() or None
 
 
+def _corpus_relative(path: str | None) -> str | None:
+    """The corpus-relative tail of a recorded artifact path.
+
+    Lane artifacts record ABSOLUTE paths from the machine that produced
+    them, so the leading directories are meaningless here. Everything from
+    `analysis-results/` onward is the portable part.
+    """
+    if not path:
+        return None
+    return str(path).split("analysis-results/")[-1] or None
+
+
+def _subject_index(resolution: Any, link: str) -> dict[str, Any]:
+    """Index corpus records by whichever key this lane links on."""
+    index: dict[str, Any] = {}
+    for record in resolution.records:
+        if link == "repo_url":
+            key = _canonical_repo_url(getattr(record, "repo_url", None))
+            if key:
+                index.setdefault(key, record)
+            continue
+        # A validation names the report it validated, and which report that
+        # is varies -- audit, findings-current, the markdown audit when
+        # there is no JSON, or the triage. Index all of them.
+        for attr in ("audit_json", "findings_current", "audit_md", "triage_json"):
+            key = _corpus_relative(getattr(record, attr, None))
+            if key:
+                index.setdefault(key, record)
+    return index
+
+
+def _lane_subject(document: dict, spec: LaneSpec, index: dict[str, Any]) -> Any:
+    """Resolve a lane artifact to its corpus record, or None."""
+    if spec.link == "repo_url":
+        # Where the repository lives differs BY FAMILY: pqc-readiness nests
+        # it under metadata, pqc-facts carries it at the top level. Reading
+        # one shape silently matched nothing for the other.
+        url = _canonical_repo_url(
+            (document.get("metadata") or {}).get("repository") or document.get("repository")
+        )
+        return index.get(url or "")
+    for source in document.get("source_reports") or []:
+        record = index.get(_corpus_relative(source.get("path")) or "")
+        if record is not None:
+            return record
+    return None
+
+
 def plan_lanes(
     results: Path, cfg: CorpusConfig, resolution: Any, lanes: list[str] | None = None
 ) -> Iterator[tuple]:
@@ -154,32 +230,26 @@ def plan_lanes(
     ownership would be a second answer to "who owns this", which is the
     disagreement this whole projection exists to remove.
 
-    A lane artifact whose repository matches no corpus subject is reported
-    rather than silently bound to an invented subject: it means the repo is
-    outside the declared corpus, so it has no owner and no denominator.
+    A lane artifact that resolves to no corpus subject is reported rather
+    than bound to an invented one: it means the work sits outside the
+    declared corpus, so it has no owner and no denominator.
     """
-    by_url: dict[str, Any] = {}
-    for record in resolution.records:
-        url = _canonical_repo_url(getattr(record, "repo_url", None))
-        if url and url not in by_url:
-            by_url[url] = record
-
-    for lane, suffixes in LANE_FAMILY_BY_SUFFIX.items():
+    for lane, spec in LANE_SPECS.items():
         if lanes is not None and lane not in lanes:
             continue
         root = results / lane
         if not root.is_dir():
             continue
-        for path in sorted(root.glob("*/*.json")):
+        index = _subject_index(resolution, spec.link)
+        for path in sorted(root.glob(spec.glob)):
             # `_manifest` is corpus bookkeeping, not subject artifacts. It
             # holds retired-duplicate-slugs among other things, and
-            # ingesting those would double-count 20 repos. One level deep
-            # already excludes them; naming it keeps that deliberate rather
-            # than incidental on the next glob change.
+            # ingesting those would double-count 20 repos.
             if "_manifest" in path.parts:
                 continue
             family = next(
-                (f for suffix, f in suffixes.items() if path.name.endswith(suffix)), None
+                (f for suffix, f in spec.families.items() if path.name.endswith(suffix)),
+                None,
             )
             if family is None:
                 continue
@@ -188,15 +258,7 @@ def plan_lanes(
             except (OSError, json.JSONDecodeError):
                 yield ("__unreadable__", lane, path.name, None)
                 continue
-            # Where the repository lives differs BY FAMILY: pqc-readiness
-            # nests it under metadata, pqc-facts carries it at the top
-            # level. Reading only one shape silently matched nothing for
-            # the other -- measured, 3,246 facts artifacts unmatched.
-            url = _canonical_repo_url(
-                (document.get("metadata") or {}).get("repository")
-                or document.get("repository")
-            )
-            record = by_url.get(url or "")
+            record = _lane_subject(document, spec, index)
             if record is None:
                 yield ("__unmatched_lane__", lane, path.name, None)
                 continue
