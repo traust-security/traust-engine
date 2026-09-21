@@ -13,7 +13,7 @@ import jsonschema
 from traust_contracts.paths import schema_dir as _schema_dir
 
 SCHEMA_DIR = _schema_dir()
-from traust_engine.reporting import render, validate
+from traust_engine.reporting import lint, render, validate
 from traust_engine.reporting.render import render_report
 from traust_engine.reporting.validate import (
     ValidationResult,
@@ -1482,11 +1482,32 @@ class TestThreatModelArtifact(unittest.TestCase):
     def test_render_round_trips_the_authored_document(self):
         """The prose is generated from the artifact, so it cannot disagree."""
         markdown = render.render_threat_model(self.DOC)
-        self.assertIn("## 4. Threats", markdown)
+        self.assertTrue(markdown.startswith("# Threat Model: example"))
         self.assertIn("Token theft via log leak", markdown)
         self.assertIn("| T1 |", markdown)
         self.assertIn("- mode: bootstrap", markdown)
-        # every required section heading, in order
-        headings = [h for h in range(1, 11)]
-        positions = [markdown.index(f"## {h}. ") for h in headings]
+        # sections 1-7 are REQUIRED and always emitted, in order
+        positions = [markdown.index(f"## {n}. ") for n in range(1, 8)]
         self.assertEqual(positions, sorted(positions))
+
+    def test_rendering_passes_the_prose_linter(self):
+        """The Markdown is a rendering, so it must satisfy the prose
+        contract by construction — never by someone editing it after."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "repo-threat-model.md"
+            path.write_text(render.render_threat_model(self.DOC), encoding="utf-8")
+            errors, _ = lint.lint_file(path)
+            self.assertEqual(errors, [], errors)
+
+    def test_empty_optional_sections_are_omitted_not_emitted_empty(self):
+        """The linter reads a present-but-empty section 9/10 as an error and
+        an absent one as fine, so an empty optional section must not be
+        rendered at all."""
+        markdown = render.render_threat_model(self.DOC)
+        self.assertNotIn("## 9. Attack scenarios", markdown)
+        self.assertNotIn("## 10. Tenant boundaries", markdown)
+        populated = dict(self.DOC)
+        populated["tenant_boundaries"] = [
+            {"boundary_id": "B1", "interface": "api", "kind": "http", "exposure": "public"}
+        ]
+        self.assertIn("## 10. Tenant boundaries", render.render_threat_model(populated))

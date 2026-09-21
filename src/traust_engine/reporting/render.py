@@ -508,75 +508,101 @@ def _tm_table(columns: tuple[str, ...], rows: list[dict]) -> list[str]:
     return out
 
 
-def _tm_section(number: int, title: str, body: list[str]) -> list[str]:
-    """A section is emitted even when empty.
-
-    An absent section and an empty one are different claims: "no
-    deprioritized threats" is a statement, "we never considered
-    deprioritisation" is not. schema.md requires the headings in order.
-    """
-    return [f"## {number}. {title}", ""] + (body or ["_none_"]) + [""]
-
-
 def render_threat_model(document: dict) -> str:
     """The Markdown view of a validated threat-model artifact.
 
-    Renders every section schema.md requires, in order, so the output
-    passes `traust reporting lint` and reads the same as an authored
-    model. Optional sections that the document does not carry render as
-    `_none_` rather than being dropped.
+    Rendered to satisfy `lint.py`, which is the prose contract: the exact
+    title form, sections 1-7 always present and carrying their tables,
+    sections 8-10 OMITTED when the model has nothing for them (the linter
+    reads a present-but-empty optional section as an error, and an absent
+    one as fine), and section 7 listing all five bullets the linter
+    requires.
+
+    `inputs` and `owner` are emitted as `unset` when the artifact does not
+    carry them. That is the prose convention for "no value recorded" --
+    `unset` is what the parser reads back as absent, so the round trip is
+    lossless and a bootstrap model still does not look reviewed.
     """
     threats = document.get("threats") or []
     columns = THREAT_COLUMNS
     if any(t.get("isolation_dimensions") for t in threats):
         columns = (*columns, "isolation_dimensions")
 
-    lines: list[str] = [f"# Threat model — {document.get('system', '')}".rstrip(), ""]
+    system = document.get("system", "")
+    lines: list[str] = [f"# Threat Model: {system}", ""]
 
-    lines += _tm_section(1, "System context", [document["system_context"]]
-                      if document.get("system_context") else [])
-    lines += _tm_section(2, "Assets", _tm_table(
-        ("asset", "description", "sensitivity"), document.get("assets") or [])
-        if document.get("assets") else [])
-    lines += _tm_section(3, "Entry points & trust boundaries", _tm_table(
+    context = document.get("system_context") or "_not recorded_"
+    lines += ["## 1. System context", "", context, ""]
+
+    lines += ["## 2. Assets", ""]
+    lines += _tm_table(("asset", "description", "sensitivity"), document.get("assets") or [])
+    lines += [""]
+
+    lines += ["## 3. Entry points & trust boundaries", ""]
+    lines += _tm_table(
         ("entry_point", "description", "trust_boundary", "reachable_assets"),
-        document.get("entry_points") or [])
-        if document.get("entry_points") else [])
-    lines += _tm_section(4, "Threats", _tm_table(columns, threats) if threats else [])
-    lines += _tm_section(5, "Deprioritized", _tm_table(
-        ("threat", "reason"), document.get("deprioritized") or [])
-        if document.get("deprioritized") else [])
-    lines += _tm_section(6, "Open questions", [
-        f"- {q}" for q in document.get("open_questions") or []])
+        document.get("entry_points") or [],
+    )
+    lines += [""]
 
-    provenance_block = document.get("provenance") or {}
-    lines += _tm_section(7, "Provenance", [
-        f"- {field}: {provenance_block[field]}"
-        for field in THREAT_PROVENANCE_FIELDS
-        if provenance_block.get(field)
-    ])
+    lines += ["## 4. Threats", ""]
+    lines += _tm_table(columns, threats)
+    lines += [""]
 
-    lines += _tm_section(8, "Recommended mitigations", _tm_table(
-        ("mitigation", "threat_ids", "closes_class", "effort"),
-        document.get("mitigations") or [])
-        if document.get("mitigations") else [])
+    lines += ["## 5. Deprioritized", ""]
+    lines += _tm_table(("threat", "reason"), document.get("deprioritized") or [])
+    lines += [""]
+
+    questions = document.get("open_questions") or []
+    lines += ["## 6. Open questions", ""]
+    lines += [f"- {q}" for q in questions] if questions else ["_none_"]
+    lines += [""]
+
+    provenance = document.get("provenance") or {}
+    lines += ["## 7. Provenance", ""]
+    for field in THREAT_PROVENANCE_FIELDS:
+        value = provenance.get(field)
+        if value:
+            lines.append(f"- {field}: {value}")
+        elif field in ("inputs", "owner"):
+            # The linter requires the bullet; `unset` is the prose spelling
+            # of absent and parses back as absent.
+            lines.append(f"- {field}: unset")
+    lines += [""]
+
+    # Sections 8-10 are OPTIONAL. Present-but-empty is an error to the
+    # linter, absent is not -- so a model with nothing to say omits them.
+    mitigations = document.get("mitigations") or []
+    if mitigations:
+        lines += ["## 8. Recommended mitigations", ""]
+        lines += _tm_table(
+            ("mitigation", "threat_ids", "closes_class", "effort"), mitigations
+        )
+        lines += [""]
 
     scenarios = document.get("attack_scenarios") or []
-    body: list[str] = []
-    for scenario in scenarios:
-        body.append(f"### {scenario.get('id', '')} — {scenario.get('threat', '')}".rstrip(" —"))
-        body.append("")
-        for step in scenario.get("steps") or []:
-            body.append(f"- {step}")
-        body.append("")
-    lines += _tm_section(9, "Attack scenarios", body)
+    if scenarios:
+        lines += ["## 9. Attack scenarios", ""]
+        for scenario in scenarios:
+            heading = f"### {scenario.get('id', '')}"
+            if scenario.get("threat"):
+                heading += f" — {scenario['threat']}"
+            lines += [heading, ""]
+            lines += [f"- {step}" for step in scenario.get("steps") or []]
+            lines += [""]
 
-    lines += _tm_section(10, "Tenant boundaries", _tm_table(
-        ("boundary_id", "interface", "kind", "exposure", "complexity", "privilege",
-         "encryption", "authentication", "connectivity", "hygiene", "threat_ids",
-         "isolation_review_ref"),
-        document.get("tenant_boundaries") or [])
-        if document.get("tenant_boundaries") else [])
+    boundaries = document.get("tenant_boundaries") or []
+    if boundaries:
+        lines += ["## 10. Tenant boundaries", ""]
+        lines += _tm_table(
+            (
+                "boundary_id", "interface", "kind", "exposure", "complexity",
+                "privilege", "encryption", "authentication", "connectivity",
+                "hygiene", "threat_ids", "isolation_review_ref",
+            ),
+            boundaries,
+        )
+        lines += [""]
 
     history = document.get("update_history") or []
     if history:
