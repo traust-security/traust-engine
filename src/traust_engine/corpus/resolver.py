@@ -558,7 +558,7 @@ def _claim_shared_cumulative(records: list[ReportRecord], res: Resolution) -> No
     by_base: dict[str, list[ReportRecord]] = {}
     for record in records:
         by_base.setdefault(record.base, []).append(record)
-    for base, group in sorted(by_base.items()):
+    for _base, group in sorted(by_base.items()):
         if len(group) < 2:
             continue
         path = next((r.findings_current for r in group if r.findings_current), None)

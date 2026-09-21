@@ -81,7 +81,10 @@ from traust_engine.ledger.service import (
 # encapsulates all signing concerns atomically.
 
 
-__all__ = [
+# RUF022 is suppressed below: this list is grouped by concern (Identity /
+# Events / Integrity / Service + SDK) with section comments, and sorting the
+# whole list would strip the grouping, which is the only navigation here.
+__all__ = [  # noqa: RUF022
     # Legacy (removed: stamp_and_sign — use LedgerService.sign())
     # Identity
     "ALGO_LADDER",
