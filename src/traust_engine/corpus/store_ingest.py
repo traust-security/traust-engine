@@ -88,6 +88,17 @@ FAMILY_BY_REF: dict[str, dict[str, str]] = {
 DERIVED_BY_SUFFIX: dict[str, tuple[str, str, str]] = {
     # family: (ref the resolver returns, its suffix, the suffix to swap in)
     "threat-model": ("threat_model", "-threat-model.md", "-threat-model.json"),
+    # Verification closes the remediate loop: a fix is claimed, and this
+    # adjudicates whether it held. 2,029 of them sit beside the audit they
+    # re-check, every one with a sibling <base>-security-audit.json, so the
+    # path derives rather than needing a ReportRecord field.
+    "verification": (
+        "audit_json",
+        "-security-audit.json",
+        "-remediation-verification.json",
+    ),
+    # Official-docs claims contradicted by code evidence. Same shape.
+    "doc-variance": ("audit_json", "-security-audit.json", "-doc-variance.json"),
 }
 
 
@@ -159,12 +170,15 @@ def _run_id(subject: str, path: Path | None, results: Path | None) -> str:
 def _bindings(
     family: str,
     scope: str,
-    subject: str,
+    subject: str | None,
     path: Path | None = None,
     results: Path | None = None,
 ) -> Binding:
     if family == "layer":
         return Binding(scope_id=scope, layer_id=f"corpus:layer:{subject}")
+    if subject is None:
+        # An aggregate belongs to the scope. No invented subject.
+        return Binding(scope_id=scope)
     return Binding(
         scope_id=scope,
         subject_id=subject,
@@ -323,6 +337,30 @@ def plan_lanes(
             yield family, scope, repo_key(record), path
 
 
+#: Lanes whose artifacts belong to the SCOPE rather than to one subject.
+#: An impact analysis is one advisory assessed across many repos -- it has
+#: no single subject, which is exactly why profiles.json classes it
+#: `aggregate` with no required binding context. Forcing a subject on it
+#: would have to pick one of the repos it names, and every choice is wrong.
+AGGREGATE_LANES: dict[str, tuple[str, str]] = {
+    # directory: (glob, family)
+    "impact": ("*-impact-analysis.json", "impact-analysis"),
+}
+
+
+def plan_aggregates(results: Path, cfg: CorpusConfig) -> Iterator[tuple]:
+    """Yield (family, scope, None, path) for scope-level artifacts."""
+    scope = cfg.readable_scopes()[0] if len(cfg.readable_scopes()) == 1 else cfg.scope.id
+    for lane, (pattern, family) in AGGREGATE_LANES.items():
+        root = results / lane
+        if not root.is_dir():
+            continue
+        for path in sorted(root.glob(pattern)):
+            if "_manifest" in path.parts:
+                continue
+            yield family, scope, None, path
+
+
 def plan(results: Path, cfg: CorpusConfig, trees: list[str] | None = None) -> Iterator[tuple]:
     """Yield (family, scope, subject, path) for every ingestable artifact."""
     resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
@@ -426,7 +464,11 @@ def ingest_tree(
     resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
     if not dry_run:
         report.subjects = ingest_registry(store, results, cfg, trees)
-    planned = chain(plan(results, cfg, trees), plan_lanes(results, cfg, resolution))
+    planned = chain(
+        plan(results, cfg, trees),
+        plan_lanes(results, cfg, resolution),
+        plan_aggregates(results, cfg),
+    )
     for family, scope, subject, path in planned:
         if family == "__unregistered__":
             report.unregistered[scope] = report.unregistered.get(scope, 0) + 1

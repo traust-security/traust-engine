@@ -144,3 +144,38 @@ def test_reports_beside_a_subject_keep_the_per_subject_run(tmp_path):
     report.parent.mkdir(parents=True)
     binding = si._bindings("report", "local", "findings/p/r/r", report, results)
     assert binding.run_id == "corpus:run:findings/p/r/r"
+
+
+def test_an_aggregate_artifact_binds_to_the_scope_not_a_subject(tmp_path):
+    """An impact analysis is one advisory across many repos.
+
+    It has no single subject — profiles.json classes it `aggregate` with
+    no required binding context for exactly that reason. Forcing a
+    subject would mean picking one of the repos it names, and every
+    choice is wrong.
+    """
+    binding = si._bindings("impact-analysis", "local", None)
+    assert binding.scope_id == "local"
+    assert binding.subject_id is None
+    assert binding.run_id is None
+
+
+def test_the_impact_lane_is_discovered(tmp_path):
+    results = tmp_path / "analysis-results"
+    (results / "impact").mkdir(parents=True)
+    (results / "impact" / "cve-2026-1-impact-analysis.json").write_text("{}")
+    (results / "impact" / "_manifest").mkdir()
+    (results / "impact" / "_manifest" / "x-impact-analysis.json").write_text("{}")
+
+    cfg = CorpusConfig.model_validate(
+        yaml.safe_load(
+            "version: 1\ntrees:\n  findings:"
+            " {label: l, ownership: owned, business_unit: B}\n"
+        )
+    )
+    planned = list(si.plan_aggregates(results, cfg))
+    assert len(planned) == 1, "_manifest is bookkeeping, not an artifact"
+    family, _scope, subject, path = planned[0]
+    assert family == "impact-analysis"
+    assert subject is None
+    assert path.name == "cve-2026-1-impact-analysis.json"
