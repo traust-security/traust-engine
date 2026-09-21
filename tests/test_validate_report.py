@@ -13,6 +13,7 @@ import jsonschema
 from traust_contracts.paths import schema_dir as _schema_dir
 
 SCHEMA_DIR = _schema_dir()
+from traust_engine.reporting import render, validate
 from traust_engine.reporting.render import render_report
 from traust_engine.reporting.validate import (
     ValidationResult,
@@ -1414,3 +1415,78 @@ class TestFindingIdentityStamp:
         res = ValidationResult("r.json")
         strict_checks(self._rep(self.AUTO), res)
         assert not [e for e in res.errors if "fingerprint" in e]
+
+
+class TestThreatModelArtifact(unittest.TestCase):
+    """The threat model is authored as JSON and rendered, like every other
+    artifact. Its schema is the contract; the code-audit cross-checks are
+    not."""
+
+    DOC = {
+        "system": "example",
+        "provenance": {
+            "mode": "bootstrap",
+            "date": "2026-01-02",
+            "target": "https://example.test/repo @ abc1234",
+        },
+        "threats": [
+            {
+                "id": "T1",
+                "threat": "Token theft via log leak",
+                "actor": ["remote_auth"],
+                "surface": "api",
+                "asset": "tokens",
+                "impact": "high",
+                "likelihood": "likely",
+                "status": "unmitigated",
+                "controls": "none",
+                "evidence": ["FIND-001"],
+                "attack_refs": ["T1552"],
+            }
+        ],
+    }
+
+    def _write(self, tmp, document):
+        path = Path(tmp) / "repo-threat-model.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        return path
+
+    def test_schema_is_auto_detected_from_the_filename(self):
+        detected = validate.detect_schema_path(Path("repo-threat-model.json"))
+        self.assertIsNotNone(detected)
+        self.assertEqual(detected.name, "threat-model.schema.json")
+
+    def test_conformant_model_passes_without_code_audit_crosschecks(self):
+        """It has no severity_criteria and no metadata.repository, and must
+        not be failed for lacking either — those describe a finding report."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(tmp, self.DOC)
+            schema = json.loads(
+                validate.detect_schema_path(path).read_text(encoding="utf-8")
+            )
+            result = validate.validate_report(str(path), schema)
+            self.assertTrue(result.passed, result.errors)
+
+    def test_off_contract_enum_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            document = json.loads(json.dumps(self.DOC))
+            document["threats"][0]["status"] = "open"
+            path = self._write(tmp, document)
+            schema = json.loads(
+                validate.detect_schema_path(path).read_text(encoding="utf-8")
+            )
+            result = validate.validate_report(str(path), schema)
+            self.assertFalse(result.passed)
+            self.assertTrue(any("status" in e for e in result.errors), result.errors)
+
+    def test_render_round_trips_the_authored_document(self):
+        """The prose is generated from the artifact, so it cannot disagree."""
+        markdown = render.render_threat_model(self.DOC)
+        self.assertIn("## 4. Threats", markdown)
+        self.assertIn("Token theft via log leak", markdown)
+        self.assertIn("| T1 |", markdown)
+        self.assertIn("- mode: bootstrap", markdown)
+        # every required section heading, in order
+        headings = [h for h in range(1, 11)]
+        positions = [markdown.index(f"## {h}. ") for h in headings]
+        self.assertEqual(positions, sorted(positions))

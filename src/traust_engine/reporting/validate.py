@@ -1671,6 +1671,13 @@ def validate_report(
             pass
         elif "validation" in sid:
             cross_validate_validation(report, result)
+        elif "threat-model" in sid:
+            # The threat model is authored as JSON against its schema and
+            # the Markdown is rendered from it. The code-audit cross-checks
+            # (severity_criteria, findings_summary) describe a finding
+            # report and do not fit a threat model at all; the schema's
+            # enums and required fields ARE the contract here.
+            pass
         else:
             cross_validate(report, result)
 
@@ -1686,6 +1693,10 @@ def validate_report(
         "vuln-findings",
         "cloud-config-findings-current",
         "cloud-config-audit",
+        # A threat model carries threats, not findings — no cross-scan
+        # fingerprint, and its `provenance.target` is what records the
+        # repository, not `metadata.repository`.
+        "threat-model",
     )
     if not any(k in sid for k in _non_audit):
         check_finding_identity(report, result)
