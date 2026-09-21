@@ -380,14 +380,14 @@ def repo_key(rec) -> str:
     repo carried two kinds of report. Three do — example-acm, automation-iac and
     acs-fleet-manager-config each have both a `-security-audit.json` and a
     `-cloud-config-audit.json` — so `INSERT OR REPLACE` dropped one of each pair and
-    findings.db held 8,601 rows for 8,604 records, with nothing to show a row had
+    findings.db held fewer rows than records, with nothing to show a row had
     been overwritten. Same defect shape as the projection's (layer_id, finding_ref):
     a key missing a dimension, merging silently.
 
     Only non-default kinds are suffixed. repo_key is a published identifier that
-    dashboards and saved queries reference, and changing 8,512 code-audit keys to
-    disambiguate 3 collisions would be a worse trade than the 92 that actually need
-    it (91 cloud-config + 1 container-audit).
+    dashboards and saved queries reference, and changing every code-audit key to
+    disambiguate a handful of collisions would be a worse trade than suffixing only
+    the few kinds that actually need it (cloud-config and container-audit).
     """
     parts = [rec.tree]
     if rec.product:

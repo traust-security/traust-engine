@@ -1461,9 +1461,7 @@ class TestThreatModelArtifact(unittest.TestCase):
         not be failed for lacking either — those describe a finding report."""
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(tmp, self.DOC)
-            schema = json.loads(
-                validate.detect_schema_path(path).read_text(encoding="utf-8")
-            )
+            schema = json.loads(validate.detect_schema_path(path).read_text(encoding="utf-8"))
             result = validate.validate_report(str(path), schema)
             self.assertTrue(result.passed, result.errors)
 
@@ -1472,9 +1470,7 @@ class TestThreatModelArtifact(unittest.TestCase):
             document = json.loads(json.dumps(self.DOC))
             document["threats"][0]["status"] = "open"
             path = self._write(tmp, document)
-            schema = json.loads(
-                validate.detect_schema_path(path).read_text(encoding="utf-8")
-            )
+            schema = json.loads(validate.detect_schema_path(path).read_text(encoding="utf-8"))
             result = validate.validate_report(str(path), schema)
             self.assertFalse(result.passed)
             self.assertTrue(any("status" in e for e in result.errors), result.errors)

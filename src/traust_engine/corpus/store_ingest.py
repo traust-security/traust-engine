@@ -32,9 +32,9 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
-from itertools import chain
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
@@ -89,7 +89,7 @@ DERIVED_BY_SUFFIX: dict[str, tuple[str, str, str]] = {
     # family: (ref the resolver returns, its suffix, the suffix to swap in)
     "threat-model": ("threat_model", "-threat-model.md", "-threat-model.json"),
     # Verification closes the remediate loop: a fix is claimed, and this
-    # adjudicates whether it held. 2,029 of them sit beside the audit they
+    # adjudicates whether it held. They sit beside the audit they
     # re-check, every one with a sibling <base>-security-audit.json, so the
     # path derives rather than needing a ReportRecord field.
     "verification": (
@@ -232,7 +232,7 @@ def _canonical_repo_url(url: str | None) -> str | None:
 
     Trailing slash, a `.git` suffix and case all vary between the corpus
     registry and a lane artifact's metadata. Measured across the live
-    corpus, normalising these three gives a 100% join (3,159 of 3,159).
+    corpus, normalising these three gives a complete join.
     """
     if not url:
         return None
@@ -485,9 +485,7 @@ def ingest_tree(
             report.by_family[family] = report.by_family.get(family, 0) + 1
             continue
         try:
-            result = store.ingest(
-                family, payload, _bindings(family, scope, subject, path, results)
-            )
+            result = store.ingest(family, payload, _bindings(family, scope, subject, path, results))
         except IngestError as error:
             report.rejected += 1
             reason = str(error).split("validation:", 1)[-1].strip()[:70]
@@ -522,8 +520,7 @@ def render(report: IngestReport) -> str:
             lines.append(f"  {count:6}  {tree}")
     if report.unmatched_lane:
         lines.append(
-            "SKIPPED -- lane artifact whose repository is not a corpus "
-            "subject, so it has no owner:"
+            "SKIPPED -- lane artifact whose repository is not a corpus subject, so it has no owner:"
         )
         for lane, count in sorted(report.unmatched_lane.items(), key=lambda kv: -kv[1]):
             lines.append(f"  {count:6}  {lane}")

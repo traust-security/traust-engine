@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from traust_contracts.v1.models.layer import LayerActor
-
 from traust_ledger.api import reports
 from traust_ledger.client import LedgerClient, LedgerError
 
@@ -228,9 +227,7 @@ class LedgerService:
         )
         return True
 
-    def stamp_event_identities(
-        self, layer_path: Path, fingerprints: dict[str, str]
-    ) -> int:
+    def stamp_event_identities(self, layer_path: Path, fingerprints: dict[str, str]) -> int:
         """Backfill event fingerprints and re-sign atomically via the SDK.
 
         The skill hands the fingerprint map (finding_ref -> fp) to the ledger,

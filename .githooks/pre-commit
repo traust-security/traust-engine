@@ -1,4 +1,32 @@
 #!/usr/bin/env bash
+
+repo_root="$(git rev-parse --show-toplevel)"
+py="python3"
+if [ -x "$repo_root/.venv/bin/python" ]; then
+  py="$repo_root/.venv/bin/python"
+fi
+
+# --- estate-data guard (fail-closed) ----------------------------------
+# This repo is PUBLIC. A corpus figure is a permanent statement about one
+# deployment's size, backlog and error rate, and unlike a credential there
+# is nothing to rotate. Runs BEFORE any language-specific early exit: the
+# first version sat after one, so a commit touching only .md or .sql --
+# which is where these figures actually live -- sailed straight past it.
+estate_checker="$repo_root/ci/check_estate_data.py"
+if [ ! -f "$estate_checker" ]; then
+  echo "pre-commit: $estate_checker is MISSING — refusing to commit" >&2
+  echo "            without the estate-data gate (fail-closed)." >&2
+  exit 1
+fi
+if ! "$py" "$estate_checker" --staged --quiet; then
+  echo "" >&2
+  echo "pre-commit: estate-data check FAILED — this repo is PUBLIC." >&2
+  echo "            Generalise the figure; the engineering point survives" >&2
+  echo "            without it. Red Hat-specific material belongs in" >&2
+  echo "            traust-internal/. To bypass: git commit --no-verify" >&2
+  exit 1
+fi
+
 # pre-commit hook — fast lint on staged .py files only.
 # Bypass: git commit --no-verify
 set -euo pipefail

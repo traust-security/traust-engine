@@ -575,9 +575,7 @@ def render_threat_model(document: dict) -> str:
     mitigations = document.get("mitigations") or []
     if mitigations:
         lines += ["## 8. Recommended mitigations", ""]
-        lines += _tm_table(
-            ("mitigation", "threat_ids", "closes_class", "effort"), mitigations
-        )
+        lines += _tm_table(("mitigation", "threat_ids", "closes_class", "effort"), mitigations)
         lines += [""]
 
     scenarios = document.get("attack_scenarios") or []
@@ -596,9 +594,18 @@ def render_threat_model(document: dict) -> str:
         lines += ["## 10. Tenant boundaries", ""]
         lines += _tm_table(
             (
-                "boundary_id", "interface", "kind", "exposure", "complexity",
-                "privilege", "encryption", "authentication", "connectivity",
-                "hygiene", "threat_ids", "isolation_review_ref",
+                "boundary_id",
+                "interface",
+                "kind",
+                "exposure",
+                "complexity",
+                "privilege",
+                "encryption",
+                "authentication",
+                "connectivity",
+                "hygiene",
+                "threat_ids",
+                "isolation_review_ref",
             ),
             boundaries,
         )

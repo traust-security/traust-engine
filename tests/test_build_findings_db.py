@@ -296,7 +296,7 @@ def test_repo_key_separates_two_report_kinds_for_one_repo(tmp_path):
 
     Measured on the corpus: three cloud-config repos carry both a -security-audit.json
     and a -cloud-config-audit.json, and the key omitted report_kind, so findings.db
-    held 8,601 rows for the resolver's 8,604 with no error and nothing in the row to
+    held fewer rows than the resolver had records, with no error and nothing in the row to
     show a merge happened.
     """
     results, cfg = _mk_ws(tmp_path)

@@ -169,8 +169,7 @@ def test_the_impact_lane_is_discovered(tmp_path):
 
     cfg = CorpusConfig.model_validate(
         yaml.safe_load(
-            "version: 1\ntrees:\n  findings:"
-            " {label: l, ownership: owned, business_unit: B}\n"
+            "version: 1\ntrees:\n  findings: {label: l, ownership: owned, business_unit: B}\n"
         )
     )
     planned = list(si.plan_aggregates(results, cfg))

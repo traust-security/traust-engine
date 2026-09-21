@@ -382,7 +382,7 @@ def test_live_census_pins_2026_07_17():
     res = corpus.resolve(LIVE_ROOT, HarnessEngine.load().corpus.config())
     agg = corpus.aggregates(res)
     f = agg["trees"]["findings"]
-    assert f["reports"] == 8047  # 7,885 audit JSONs + 162 md-only
+    assert f["reports"] == 8047  # audit JSONs plus md-only models
     assert f["reports_md_only"] == 162
     assert f["branch_reaudits"] == 4214
     assert f["unique_base_slugs"] == 3283
@@ -530,7 +530,7 @@ def test_unreadable_shared_cumulative_warns_instead_of_picking(tmp_path):
 
 
 def test_single_kind_directory_is_untouched(synthetic):
-    """8,601 of 8,604 records must see no change at all."""
+    """Single-kind directories must see no change at all."""
     ar, cfg = synthetic
     res = corpus.resolve(ar, cfg)
     repo1 = [
