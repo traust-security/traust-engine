@@ -490,7 +490,7 @@ THREAT_COLUMNS = (
 )
 
 
-def _cell(value) -> str:
+def _tm_cell(value) -> str:
     """One table cell. Lists join with ', '; a pipe would break the row."""
     if value is None:
         return ""
@@ -499,16 +499,16 @@ def _cell(value) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ").strip()
 
 
-def _table(columns: tuple[str, ...], rows: list[dict]) -> list[str]:
+def _tm_table(columns: tuple[str, ...], rows: list[dict]) -> list[str]:
     out = [
         "| " + " | ".join(columns) + " |",
         "|" + "|".join("---" for _ in columns) + "|",
     ]
-    out.extend("| " + " | ".join(_cell(row.get(c)) for c in columns) + " |" for row in rows)
+    out.extend("| " + " | ".join(_tm_cell(row.get(c)) for c in columns) + " |" for row in rows)
     return out
 
 
-def _section(number: int, title: str, body: list[str]) -> list[str]:
+def _tm_section(number: int, title: str, body: list[str]) -> list[str]:
     """A section is emitted even when empty.
 
     An absent section and an empty one are different claims: "no
@@ -533,30 +533,30 @@ def render_threat_model(document: dict) -> str:
 
     lines: list[str] = [f"# Threat model — {document.get('system', '')}".rstrip(), ""]
 
-    lines += _section(1, "System context", [document["system_context"]]
+    lines += _tm_section(1, "System context", [document["system_context"]]
                       if document.get("system_context") else [])
-    lines += _section(2, "Assets", _table(
+    lines += _tm_section(2, "Assets", _tm_table(
         ("asset", "description", "sensitivity"), document.get("assets") or [])
         if document.get("assets") else [])
-    lines += _section(3, "Entry points & trust boundaries", _table(
+    lines += _tm_section(3, "Entry points & trust boundaries", _tm_table(
         ("entry_point", "description", "trust_boundary", "reachable_assets"),
         document.get("entry_points") or [])
         if document.get("entry_points") else [])
-    lines += _section(4, "Threats", _table(columns, threats) if threats else [])
-    lines += _section(5, "Deprioritized", _table(
+    lines += _tm_section(4, "Threats", _tm_table(columns, threats) if threats else [])
+    lines += _tm_section(5, "Deprioritized", _tm_table(
         ("threat", "reason"), document.get("deprioritized") or [])
         if document.get("deprioritized") else [])
-    lines += _section(6, "Open questions", [
+    lines += _tm_section(6, "Open questions", [
         f"- {q}" for q in document.get("open_questions") or []])
 
     provenance_block = document.get("provenance") or {}
-    lines += _section(7, "Provenance", [
+    lines += _tm_section(7, "Provenance", [
         f"- {field}: {provenance_block[field]}"
         for field in THREAT_PROVENANCE_FIELDS
         if provenance_block.get(field)
     ])
 
-    lines += _section(8, "Recommended mitigations", _table(
+    lines += _tm_section(8, "Recommended mitigations", _tm_table(
         ("mitigation", "threat_ids", "closes_class", "effort"),
         document.get("mitigations") or [])
         if document.get("mitigations") else [])
@@ -569,9 +569,9 @@ def render_threat_model(document: dict) -> str:
         for step in scenario.get("steps") or []:
             body.append(f"- {step}")
         body.append("")
-    lines += _section(9, "Attack scenarios", body)
+    lines += _tm_section(9, "Attack scenarios", body)
 
-    lines += _section(10, "Tenant boundaries", _table(
+    lines += _tm_section(10, "Tenant boundaries", _tm_table(
         ("boundary_id", "interface", "kind", "exposure", "complexity", "privilege",
          "encryption", "authentication", "connectivity", "hygiene", "threat_ids",
          "isolation_review_ref"),
@@ -581,7 +581,7 @@ def render_threat_model(document: dict) -> str:
     history = document.get("update_history") or []
     if history:
         lines += ["### Update history", ""]
-        lines += _table(("date", "changes", "reason"), history)
+        lines += _tm_table(("date", "changes", "reason"), history)
         lines += [""]
 
     return "\n".join(lines).rstrip() + "\n"
