@@ -125,10 +125,51 @@ def repo_key(record: corpus.ReportRecord) -> str:
     return f"{key}#cloud-config" if record.report_kind == "cloud-config" else key
 
 
-def _bindings(family: str, scope: str, subject: str) -> Binding:
+def _run_id(subject: str, path: Path | None, results: Path | None) -> str:
+    """The run this artifact belongs to.
+
+    Per-SUBJECT is wrong for the cross-cutting lanes. One subject can own
+    many lane artifacts -- `acm-cli` has 18 validation runs, `acm.v040`
+    through `acm.v060` plus an `acm.v058/spoke` variant -- and keying the
+    run on the subject alone gave all 18 the identical binding context.
+    They stayed distinct only because their CONTENT digests differ, which
+    means no consumer could tell one run from another, order them, or ask
+    which one a row came from.
+
+    The lane directory is the run: `validations/acm.v060/…` and
+    `validations/acm.v058/spoke/…` are what the operator actually named.
+    Using it keeps the identifier inside the corpus layout rather than
+    inventing one, and it is stable across re-ingest because it is on
+    disk. Reports beside a subject keep the per-subject form: there is
+    exactly one of each there, so it was never ambiguous.
+    """
+    if path is None or results is None:
+        return f"corpus:run:{subject}"
+    try:
+        relative = Path(path).resolve().relative_to(Path(results).resolve())
+    except ValueError:
+        return f"corpus:run:{subject}"
+    parts = relative.parts
+    if len(parts) < 2 or parts[0] not in LANE_SPECS:
+        return f"corpus:run:{subject}"
+    # everything between the lane root and the filename
+    return "corpus:run:" + "/".join(parts[:-1])
+
+
+def _bindings(
+    family: str,
+    scope: str,
+    subject: str,
+    path: Path | None = None,
+    results: Path | None = None,
+) -> Binding:
     if family == "layer":
         return Binding(scope_id=scope, layer_id=f"corpus:layer:{subject}")
-    return Binding(scope_id=scope, subject_id=subject, run_id=f"corpus:run:{subject}")
+    return Binding(
+        scope_id=scope,
+        subject_id=subject,
+        run_id=_run_id(subject, path, results),
+    )
 
 
 @dataclass(frozen=True)
@@ -402,7 +443,9 @@ def ingest_tree(
             report.by_family[family] = report.by_family.get(family, 0) + 1
             continue
         try:
-            result = store.ingest(family, payload, _bindings(family, scope, subject))
+            result = store.ingest(
+                family, payload, _bindings(family, scope, subject, path, results)
+            )
         except IngestError as error:
             report.rejected += 1
             reason = str(error).split("validation:", 1)[-1].strip()[:70]
