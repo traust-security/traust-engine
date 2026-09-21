@@ -1759,6 +1759,11 @@ def detect_schema_path(file_path: Path) -> Path | None:
         # is deliberately NOT auto-detected — it would fail a schema it
         # never promised to meet.
         return SCHEMA_DIR / "vuln-findings.schema.json"
+    if name.endswith("-threat-model.json"):
+        # The threat model IS the JSON; the .md beside it is rendered from
+        # this document. Auto-detected so a sweep validates it the same way
+        # it validates every other artifact.
+        return SCHEMA_DIR / "threat-model.schema.json"
     if name.endswith("-impact-analysis.json"):
         return SCHEMA_DIR / "impact-analysis.schema.json"
     if name.endswith("-cloud-config-audit.json"):

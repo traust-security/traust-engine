@@ -452,3 +452,136 @@ def render_from_report(report: Report, output: Path | None = None) -> str:
     if output is not None:
         output.write_text(md, encoding="utf-8")
     return md
+
+
+# ---------------------------------------------------------------------------
+# Threat models
+# ---------------------------------------------------------------------------
+#
+# Same relationship as every other artifact: `threat-model.schema.json`
+# defines the model, the JSON is authored and validated against it, and the
+# Markdown is rendered from the validated document. The prose cannot
+# disagree with the artifact because it is generated from it.
+
+#: Provenance bullets, in contract order.
+THREAT_PROVENANCE_FIELDS = (
+    "mode",
+    "date",
+    "target",
+    "inputs",
+    "owner",
+    "harness_version",
+)
+
+#: Section 4 columns, in contract order. `isolation_dimensions` is appended
+#: only when some threat carries it (multi-tenant lens, optional).
+THREAT_COLUMNS = (
+    "id",
+    "threat",
+    "actor",
+    "surface",
+    "asset",
+    "impact",
+    "likelihood",
+    "status",
+    "controls",
+    "evidence",
+    "attack_refs",
+)
+
+
+def _cell(value) -> str:
+    """One table cell. Lists join with ', '; a pipe would break the row."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        value = ", ".join(str(v) for v in value)
+    return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _table(columns: tuple[str, ...], rows: list[dict]) -> list[str]:
+    out = [
+        "| " + " | ".join(columns) + " |",
+        "|" + "|".join("---" for _ in columns) + "|",
+    ]
+    out.extend("| " + " | ".join(_cell(row.get(c)) for c in columns) + " |" for row in rows)
+    return out
+
+
+def _section(number: int, title: str, body: list[str]) -> list[str]:
+    """A section is emitted even when empty.
+
+    An absent section and an empty one are different claims: "no
+    deprioritized threats" is a statement, "we never considered
+    deprioritisation" is not. schema.md requires the headings in order.
+    """
+    return [f"## {number}. {title}", ""] + (body or ["_none_"]) + [""]
+
+
+def render_threat_model(document: dict) -> str:
+    """The Markdown view of a validated threat-model artifact.
+
+    Renders every section schema.md requires, in order, so the output
+    passes `traust reporting lint` and reads the same as an authored
+    model. Optional sections that the document does not carry render as
+    `_none_` rather than being dropped.
+    """
+    threats = document.get("threats") or []
+    columns = THREAT_COLUMNS
+    if any(t.get("isolation_dimensions") for t in threats):
+        columns = (*columns, "isolation_dimensions")
+
+    lines: list[str] = [f"# Threat model — {document.get('system', '')}".rstrip(), ""]
+
+    lines += _section(1, "System context", [document["system_context"]]
+                      if document.get("system_context") else [])
+    lines += _section(2, "Assets", _table(
+        ("asset", "description", "sensitivity"), document.get("assets") or [])
+        if document.get("assets") else [])
+    lines += _section(3, "Entry points & trust boundaries", _table(
+        ("entry_point", "description", "trust_boundary", "reachable_assets"),
+        document.get("entry_points") or [])
+        if document.get("entry_points") else [])
+    lines += _section(4, "Threats", _table(columns, threats) if threats else [])
+    lines += _section(5, "Deprioritized", _table(
+        ("threat", "reason"), document.get("deprioritized") or [])
+        if document.get("deprioritized") else [])
+    lines += _section(6, "Open questions", [
+        f"- {q}" for q in document.get("open_questions") or []])
+
+    provenance_block = document.get("provenance") or {}
+    lines += _section(7, "Provenance", [
+        f"- {field}: {provenance_block[field]}"
+        for field in THREAT_PROVENANCE_FIELDS
+        if provenance_block.get(field)
+    ])
+
+    lines += _section(8, "Recommended mitigations", _table(
+        ("mitigation", "threat_ids", "closes_class", "effort"),
+        document.get("mitigations") or [])
+        if document.get("mitigations") else [])
+
+    scenarios = document.get("attack_scenarios") or []
+    body: list[str] = []
+    for scenario in scenarios:
+        body.append(f"### {scenario.get('id', '')} — {scenario.get('threat', '')}".rstrip(" —"))
+        body.append("")
+        for step in scenario.get("steps") or []:
+            body.append(f"- {step}")
+        body.append("")
+    lines += _section(9, "Attack scenarios", body)
+
+    lines += _section(10, "Tenant boundaries", _table(
+        ("boundary_id", "interface", "kind", "exposure", "complexity", "privilege",
+         "encryption", "authentication", "connectivity", "hygiene", "threat_ids",
+         "isolation_review_ref"),
+        document.get("tenant_boundaries") or [])
+        if document.get("tenant_boundaries") else [])
+
+    history = document.get("update_history") or []
+    if history:
+        lines += ["### Update history", ""]
+        lines += _table(("date", "changes", "reason"), history)
+        lines += [""]
+
+    return "\n".join(lines).rstrip() + "\n"

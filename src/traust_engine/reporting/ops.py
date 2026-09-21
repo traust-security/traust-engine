@@ -70,8 +70,17 @@ class ReportingOps(ContextOps):
         return results
 
     def render(self, path: str | Path) -> str:
-        report = json.loads(Path(path).read_text(encoding="utf-8"))
-        return render.render_report(report)
+        """Markdown for a validated artifact, dispatched on its family.
+
+        A threat model is authored as JSON against its schema exactly as a
+        security report is; the prose is a rendering of the validated
+        document, never a second source. One command for both.
+        """
+        path = Path(path)
+        document = json.loads(path.read_text(encoding="utf-8"))
+        if path.name.endswith("-threat-model.json"):
+            return render.render_threat_model(document)
+        return render.render_report(document)
 
     def lint(self, path: str | Path, *, strict: bool = False) -> tuple[list[str], list[str]]:
         return lint.lint_file(Path(path), strict=strict)
