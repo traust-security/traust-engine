@@ -2,6 +2,16 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.3.0]
+
+## Changes
+
+- **Reverted the 0.15.0 findings.db changes.** `findings_db` builds the
+  previous nine-table projection again (`SCHEMA_REVISION` 3), `store_ingest`
+  and the SLA view are as in 0.13.3. Pins: contracts 0.35.0 (the 0.33.0
+  storage contract), ledger 0.6.32. 0.15.0 remains tagged and should not be
+  pinned.
+
 ## [0.2.5]
 
 - Pin traust-contracts v0.5.0 (evidence projection + postgres storage
