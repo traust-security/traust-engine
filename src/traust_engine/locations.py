@@ -130,6 +130,12 @@ def sarif_tool_uri(loc: Locations | None) -> str | None:
 
 FINDINGS_REL = Path("findings")
 FINDINGS_DB_REL = Path("graph") / "findings.db"
+#: The storage/v1 store. A CACHE for a git adopter -- rebuildable from the
+#: artifact tree by `store ingest` -- and the system of record for a
+#: database adopter, who never runs the walker at all. Beside findings.db
+#: because both are derived projections of the same tree, not because they
+#: are the same thing.
+STORE_DB_REL = Path("graph") / "store.db"
 REPO_GRAPH_REL = Path("graph") / "repo-graph.json"
 PORTFOLIO_GRAPH_REL = Path("graph") / "portfolio-graph.db"
 FP_PRECEDENT_CACHE_REL = Path("graph") / "fp-precedent-cache.json"
@@ -162,6 +168,18 @@ def _under_results(rel: Path, loc: Locations | None) -> Path | None:
 def findings_db(loc: Locations | None) -> Path | None:
     """``<analysis-results>/graph/findings.db``, or None."""
     return _under_results(FINDINGS_DB_REL, loc)
+
+
+def store_db(loc: Locations | None) -> Path | None:
+    """``locations.store`` when set, else ``<analysis-results>/graph/store.db``.
+
+    Honors the explicit override the way ``portfolio_graph_db`` does: a
+    deployment that keeps the store off the results volume says so once,
+    here, rather than in every consumer.
+    """
+    if loc and getattr(loc, "store", None):
+        return local_path(loc.store)
+    return _under_results(STORE_DB_REL, loc)
 
 
 def repo_graph(loc: Locations | None) -> Path | None:
