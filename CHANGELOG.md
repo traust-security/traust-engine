@@ -2,6 +2,52 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.3.0]
+
+## Changes
+
+- **`findings.db` is storage/v1 on SQLite.** `traust_engine.corpus.findings_db`
+  builds the contract's tables and views (`Store.init()` at the installed
+  storage `REVISION`) and populates them through `store_ingest` from the same
+  corpus resolution `/census` counts. The legacy `findings`, `events`,
+  `validations` and `impact` tables and the `v_open`, `v_hardening` and
+  `v_distinct_owned` views are gone; their contract homes are `report_finding`,
+  `layer_event`, `validation_finding`, `impact_repo` and `open_findings`,
+  `hardening_findings`, `distinct_exposure`, read through `current_finding`
+  with `subject_id` as the repo key. Only `repos`, `graph_edges`, `provenance`,
+  `decisions` and `meta` remain harness-defined (dashboard plan, C1).
+  `SCHEMA_REVISION` 3 → 4; a reader on 3 is refused.
+
+  The build writes to a sibling `.building` file and renames it into place, so
+  a reader never sees a half-populated store. `meta` records the ingest
+  outcome (`ingest_rejected`, `ingest_reasons`, `ingest_by_family`): an
+  artifact the contract refuses is absent from every contract table, and the
+  projection says so rather than quietly projecting fewer findings.
+
+- **One `repo_key`.** `store_ingest.repo_key` suffixes every non-default
+  report kind, as `findings_db` always did; the two disagreed on
+  container-audit subjects, whose `repos` row and `subject_ownership` row
+  therefore never joined. `findings_db.repo_key` is the same function.
+
+- **Layer bindings carry their subject.** `store_ingest` binds a ledger layer
+  with `subject_id` as well as `layer_id`, so `layer_event` joins to a repo
+  through `artifact_binding` rather than by parsing the layer id. The corpus
+  registry now declares each subject's `report_kind`.
+
+- **The SLA view reads the contract.** `metrics.sla.build_view` reads
+  `layer_event` and `current_finding` (with `cvss_score`), and its
+  routed-or-filed and resolving source types come from the enums: the previous
+  lists named four source types and one resolution that exist in no enum, so
+  the "filed" clock rung could never fire. It fires now, matching the
+  `finding_timeline` view's definition.
+
+### Upgrading
+
+Contracts 0.34.0 (storage `REVISION` 16). Rebuild `findings.db`
+(`traust corpus findings-db`); the build now takes minutes and the file is
+several GB because the store retains exact artifact evidence, as the contract
+specifies.
+
 ## [0.2.5]
 
 - Pin traust-contracts v0.5.0 (evidence projection + postgres storage

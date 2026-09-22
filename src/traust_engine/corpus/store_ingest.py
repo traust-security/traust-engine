@@ -126,14 +126,25 @@ class IngestReport:
         return (self.ingested + self.already) / self.considered if self.considered else 0.0
 
 
+DEFAULT_REPORT_KIND = "code-audit"
+
+
 def repo_key(record: corpus.ReportRecord) -> str:
-    """The corpus identity of one audited subject. Mirrors findings_db."""
+    """The corpus identity of one audited subject: `tree[/product]/repo_dir/base`,
+    suffixed `#<report_kind>` for every kind but the default.
+
+    ONE definition, shared with findings_db. This module used to suffix only
+    cloud-config while findings_db suffixed every non-default kind, so a
+    container-audit subject had one identity in `repos` and another in
+    `subject_ownership`, and the join between them silently found nothing.
+    """
     parts = [record.tree]
     if record.product:
         parts.append(record.product)
     parts.extend([record.repo_dir, record.base])
     key = "/".join(parts)
-    return f"{key}#cloud-config" if record.report_kind == "cloud-config" else key
+    kind = getattr(record, "report_kind", DEFAULT_REPORT_KIND) or DEFAULT_REPORT_KIND
+    return key if kind == DEFAULT_REPORT_KIND else f"{key}#{kind}"
 
 
 def _run_id(subject: str, path: Path | None, results: Path | None) -> str:
@@ -175,7 +186,11 @@ def _bindings(
     results: Path | None = None,
 ) -> Binding:
     if family == "layer":
-        return Binding(scope_id=scope, layer_id=f"corpus:layer:{subject}")
+        # Layer-bound, AND it carries its subject. The profile requires only
+        # layer_id, but a consumer joining the time dimension to a repo --
+        # the SLA view, a per-repo MTTR -- had to parse the subject back out
+        # of the layer_id string. The binding is the right place for it.
+        return Binding(scope_id=scope, subject_id=subject, layer_id=f"corpus:layer:{subject}")
     if subject is None:
         # An aggregate belongs to the scope. No invented subject.
         return Binding(scope_id=scope)
@@ -361,9 +376,15 @@ def plan_aggregates(results: Path, cfg: CorpusConfig) -> Iterator[tuple]:
             yield family, scope, None, path
 
 
-def plan(results: Path, cfg: CorpusConfig, trees: list[str] | None = None) -> Iterator[tuple]:
+def plan(
+    results: Path,
+    cfg: CorpusConfig,
+    trees: list[str] | None = None,
+    resolution: Any | None = None,
+) -> Iterator[tuple]:
     """Yield (family, scope, subject, path) for every ingestable artifact."""
-    resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
+    if resolution is None:
+        resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
     for record in resolution.records:
         subject = repo_key(record)
         try:
@@ -393,7 +414,12 @@ def plan(results: Path, cfg: CorpusConfig, trees: list[str] | None = None) -> It
             yield family, scope, subject, results / ref
 
 
-def build_registry(results: Path, cfg: CorpusConfig, trees: list[str] | None = None) -> dict:
+def build_registry(
+    results: Path,
+    cfg: CorpusConfig,
+    trees: list[str] | None = None,
+    resolution: Any | None = None,
+) -> dict:
     """A corpus-registry artifact from the resolution.
 
     Ownership is the denominator every dashboard cut divides by, and it
@@ -405,7 +431,8 @@ def build_registry(results: Path, cfg: CorpusConfig, trees: list[str] | None = N
     ingest: corpus-config is the ownership authority and a tree it does not
     declare has no denominator.
     """
-    resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
+    if resolution is None:
+        resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
     subjects = []
     for record in resolution.records:
         # tree_meta, not cfg.trees: a registered ENGAGEMENT tree is a
@@ -420,6 +447,10 @@ def build_registry(results: Path, cfg: CorpusConfig, trees: list[str] | None = N
             "ownership": meta.ownership,
             "business_unit": meta.business_unit,
             "is_branch_audit": bool(record.is_branch_audit),
+            # The UNIT the subject's findings are counted in. A census never
+            # blends code, IaC and container audits; without this the
+            # distinction lived only in the harness's own `repos` table.
+            "report_kind": record.report_kind or DEFAULT_REPORT_KIND,
         }
         for key, value in (
             ("label", meta.label),
@@ -439,9 +470,11 @@ def build_registry(results: Path, cfg: CorpusConfig, trees: list[str] | None = N
     }
 
 
-def ingest_registry(store: Store, results: Path, cfg: CorpusConfig, trees=None) -> int:
+def ingest_registry(
+    store: Store, results: Path, cfg: CorpusConfig, trees=None, resolution: Any | None = None
+) -> int:
     """Ingest the registry. Returns the subject count."""
-    document = build_registry(results, cfg, trees)
+    document = build_registry(results, cfg, trees, resolution=resolution)
     scope = cfg.readable_scopes()[0] if len(cfg.readable_scopes()) == 1 else cfg.scope.id
     payload = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
     store.ingest("corpus-registry", payload, Binding(scope_id=scope))
@@ -455,17 +488,24 @@ def ingest_tree(
     *,
     trees: list[str] | None = None,
     dry_run: bool = False,
+    resolution: Any | None = None,
 ) -> IngestReport:
-    """Ingest every resolvable artifact. Reports rejections, never hides them."""
+    """Ingest every resolvable artifact. Reports rejections, never hides them.
+
+    `resolution` lets the caller hand in the corpus resolution it already
+    holds (findings_db builds its own tables from the same one), so the
+    population is resolved once per build rather than once per consumer.
+    """
     report = IngestReport()
     # ONE resolution, shared by the registry, the tree walk and the lanes.
     # Resolving separately per consumer is how two of them come to disagree
     # about what the corpus is.
-    resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
+    if resolution is None:
+        resolution = corpus.resolve(results, cfg, trees=trees, with_repo_urls=True)
     if not dry_run:
-        report.subjects = ingest_registry(store, results, cfg, trees)
+        report.subjects = ingest_registry(store, results, cfg, trees, resolution=resolution)
     planned = chain(
-        plan(results, cfg, trees),
+        plan(results, cfg, trees, resolution=resolution),
         plan_lanes(results, cfg, resolution),
         plan_aggregates(results, cfg),
     )
