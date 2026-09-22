@@ -50,7 +50,6 @@ import sys
 from pathlib import Path
 
 from traust_contracts.paths import schema_dir as _schema_dir
-from traust_contracts.v1.enums import DispositionResolution, SourceType, Validity
 
 from traust_engine.assets import harness_version
 from traust_engine.escaping import md_cell
@@ -66,21 +65,12 @@ except ImportError:
 
 SCHEMA_PATH = SCHEMA_DIR / "sla-policy.schema.json"
 
-# Ledger source types that count as "routed or filed" (ladder rung 1) --
-# the SAME definition storage/v1's finding_timeline view applies
-# (first_routed_or_filed = the first jira or mr_comment event). The earlier
-# list here named four values that exist in no source_type enum, so the rung
-# could never fire; rendering from the enum is what stops the next dead value.
-FILING_SOURCE_TYPES = (SourceType.JIRA.value, SourceType.MR_COMMENT.value)
+# ledger source types that count as "routed or filed" (ladder rung 1).
+# None are emitted by today's flows; the rung activates when Jira-filing
+# events reach the ledger.
+FILING_SOURCE_TYPES = ("jira_filing", "filing", "routing", "owner_assignment")
 
-RESOLVING = (DispositionResolution.RESOLVED.value,)
-
-# Findings that are not exposure and never enter an SLA clock. From the
-# enum, never typed: 'withdrawn' and 'refuted' sat in this filter for months
-# and matched nothing.
-_NON_EXPOSURE_SQL = ", ".join(
-    f"'{member.value}'" for member in (Validity.FALSE_POSITIVE, Validity.HARDENING)
-)
+RESOLVING = ("resolved", "fix_verified")
 
 # accountable-contact match tiers that may feed the digest. slug is
 # advisory-only by product_definitions.py doctrine and stays out.
@@ -241,14 +231,8 @@ def build_view(
 
     events_by_finding: dict[tuple, list] = {}
     resolved_at: dict[tuple, dt.date] = {}
-    # The time dimension is the contract's layer_event; the layer binding
-    # carries the subject (store_ingest binds layers with subject_id), so an
-    # event reaches its repo through artifact_binding rather than a string.
     for r in con.execute(
-        "SELECT b.subject_id AS repo_key, e.finding_ref AS finding_id, "
-        "e.occurred_at, e.recorded_at, e.source_type, e.resolution "
-        "FROM layer_event e JOIN artifact_binding b ON b.binding_id = e.binding_id "
-        "WHERE b.subject_id IS NOT NULL"
+        "SELECT repo_key, finding_id, occurred_at, recorded_at, source_type, resolution FROM events"
     ):
         k = (r["repo_key"], r["finding_id"])
         events_by_finding.setdefault(k, []).append(
@@ -277,16 +261,14 @@ def build_view(
     ):
         owners[r["repo_key"]] = r["owner"].split(":", 1)[-1]
 
-    # current_finding is the contract's spine: one row per CURRENT finding
-    # with its disposition and cvss_score. `repos` (harness-defined, C1)
-    # still supplies label, audit_date, product and repo_url.
     rows = con.execute(
-        "SELECT c.subject_id AS repo_key, c.finding_id, c.severity, c.cvss_score, "
-        "c.resolution, c.validity, c.title, r.ownership, "
+        "SELECT f.repo_key, f.finding_id, f.severity, f.cvss_score, "
+        "f.resolution, f.validity, f.title, r.ownership, "
         "r.business_unit, r.label, r.is_branch_audit, r.audit_date, "
         "r.product, r.repo_url "
-        "FROM current_finding c JOIN repos r ON r.repo_key = c.subject_id "
-        f"WHERE COALESCE(c.validity,'confirmed') NOT IN ({_NON_EXPOSURE_SQL}) "
+        "FROM findings f JOIN repos r USING (repo_key) "
+        "WHERE COALESCE(f.validity,'confirmed') NOT IN "
+        "('false_positive','withdrawn','refuted','hardening') "
         "AND r.is_branch_audit = 0"
     ).fetchall()
     con.close()

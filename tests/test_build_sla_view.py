@@ -85,7 +85,7 @@ def test_resolve_days_ladder():
 
 def test_clock_start_ladder():
     filed = [
-        ("2026-06-05", "2026-06-06", "jira"),
+        ("2026-06-05", "2026-06-06", "jira_filing"),
         ("2026-06-01", "2026-06-02", "triage_report"),
     ]
     d, basis = sla.clock_start(filed, "2026-05-01", "first_routed_or_filed")
@@ -112,16 +112,15 @@ def _mk_db(tmp_path):
       repo_dir TEXT, base_slug TEXT, ref TEXT, repo_url TEXT,
       is_branch_audit INTEGER, is_md_only INTEGER, preferred TEXT,
       report_path TEXT, audit_date TEXT);
-    -- The contract's shapes, as the columns the view reads. In the real
-    -- store these are storage/v1 tables and views; the fixture only needs
-    -- their column names.
-    CREATE TABLE artifact_binding (binding_id TEXT PRIMARY KEY, subject_id TEXT,
-      layer_id TEXT, scope_id TEXT);
-    CREATE TABLE layer_event (binding_id TEXT, event_id TEXT, finding_ref TEXT,
-      recorded_at TEXT, occurred_at TEXT, source_type TEXT, resolution TEXT,
-      validity TEXT);
-    CREATE TABLE current_finding (subject_id TEXT, finding_id TEXT, severity TEXT,
-      cvss_score REAL, resolution TEXT, validity TEXT, title TEXT);
+    CREATE TABLE findings (repo_key TEXT, finding_id TEXT, title TEXT,
+      severity TEXT, primary_cwe TEXT, cwes TEXT, cvss_score REAL,
+      cvss_vector TEXT, fingerprint TEXT, validity TEXT,
+      resolution TEXT, assurance TEXT, validation_status TEXT,
+      last_updated TEXT, paths TEXT);
+    CREATE TABLE events (event_id TEXT, repo_key TEXT, finding_id TEXT,
+      recorded_at TEXT, occurred_at TEXT, source_type TEXT,
+      source_ref TEXT, actor_kind TEXT, actor_identity TEXT,
+      validity TEXT, resolution TEXT);
     CREATE TABLE graph_edges (from_id TEXT, to_id TEXT, rel TEXT);
     INSERT INTO meta VALUES ('built_at', '2026-07-18T00:00:00Z');
     """)
@@ -146,23 +145,21 @@ def _mk_db(tmp_path):
     ]
     for fid_, sev, score, validity, resolution in rows:
         con.execute(
-            "INSERT INTO current_finding VALUES ('findings/p/r/r',?,?,?,?,?,?)",
-            (fid_, sev, score, resolution, validity, "t-" + fid_),
+            "INSERT INTO findings VALUES ('findings/p/r/r',?,?,?,"
+            "'CWE-1','[]',?,NULL,'fp',?,?,NULL,NULL,NULL,'[]')",
+            (fid_, "t-" + fid_, sev, score, validity, resolution),
         )
-    # The repo's layer binding carries the subject; events hang off it.
-    con.execute(
-        "INSERT INTO artifact_binding VALUES ('layer-r','findings/p/r/r',"
-        "'corpus:layer:findings/p/r/r','local')"
-    )
     # F-2 clock starts at a recent event -> still in SLA
     con.execute(
-        "INSERT INTO layer_event VALUES ('layer-r','e2','F-2',"
-        "'2026-07-10','2026-07-01','triage_report',NULL,NULL)"
+        "INSERT INTO events VALUES ('e2','findings/p/r/r','F-2',"
+        "'2026-07-10','2026-07-01','triage_report','t.json',"
+        "'machine','triage/1',NULL,NULL)"
     )
     # F-5 resolved 20 days after clock start (audit date) -> met 30d SLA
     con.execute(
-        "INSERT INTO layer_event VALUES ('layer-r','e5','F-5',"
-        "'2026-05-22','2026-05-21','verification_report','resolved',NULL)"
+        "INSERT INTO events VALUES ('e5','findings/p/r/r','F-5',"
+        "'2026-05-22','2026-05-21','verification_report',"
+        "'v.json','machine','verify/1',NULL,'resolved')"
     )
     con.execute(
         "INSERT INTO graph_edges VALUES ('owner-team:example-team','repo:github.com/org/r','owned-by')"
@@ -265,16 +262,15 @@ def _mk_pd_db(tmp_path):
       repo_dir TEXT, base_slug TEXT, ref TEXT, repo_url TEXT,
       is_branch_audit INTEGER, is_md_only INTEGER, preferred TEXT,
       report_path TEXT, audit_date TEXT);
-    -- The contract's shapes, as the columns the view reads. In the real
-    -- store these are storage/v1 tables and views; the fixture only needs
-    -- their column names.
-    CREATE TABLE artifact_binding (binding_id TEXT PRIMARY KEY, subject_id TEXT,
-      layer_id TEXT, scope_id TEXT);
-    CREATE TABLE layer_event (binding_id TEXT, event_id TEXT, finding_ref TEXT,
-      recorded_at TEXT, occurred_at TEXT, source_type TEXT, resolution TEXT,
-      validity TEXT);
-    CREATE TABLE current_finding (subject_id TEXT, finding_id TEXT, severity TEXT,
-      cvss_score REAL, resolution TEXT, validity TEXT, title TEXT);
+    CREATE TABLE findings (repo_key TEXT, finding_id TEXT, title TEXT,
+      severity TEXT, primary_cwe TEXT, cwes TEXT, cvss_score REAL,
+      cvss_vector TEXT, fingerprint TEXT, validity TEXT,
+      resolution TEXT, assurance TEXT, validation_status TEXT,
+      last_updated TEXT, paths TEXT);
+    CREATE TABLE events (event_id TEXT, repo_key TEXT, finding_id TEXT,
+      recorded_at TEXT, occurred_at TEXT, source_type TEXT,
+      source_ref TEXT, actor_kind TEXT, actor_identity TEXT,
+      validity TEXT, resolution TEXT);
     CREATE TABLE graph_edges (from_id TEXT, to_id TEXT, rel TEXT);
     INSERT INTO meta VALUES ('built_at', '2026-07-18T00:00:00Z');
     """)
@@ -294,8 +290,9 @@ def _mk_pd_db(tmp_path):
             (key, "findings", product, url),
         )
         con.execute(
-            "INSERT INTO current_finding VALUES (?,'F-1','critical',9.0,'open','confirmed','t')",
-            (key,),
+            "INSERT INTO findings VALUES (?,?,?,'critical','CWE-1',"
+            "'[]',9.0,NULL,'fp','confirmed','open',NULL,NULL,NULL,'[]')",
+            (key, "F-1", "t"),
         )
     con.commit()
     con.close()

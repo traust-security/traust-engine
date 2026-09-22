@@ -43,13 +43,9 @@ def test_a_repo_audit_triage_and_current_share_one_run_id():
     assert report.subject_id == triage.subject_id == "tree/repo/base"
 
 
-def test_a_layer_binds_by_layer_and_carries_its_subject():
-    """Layer-bound (no run), but the subject rides along: a consumer joining
-    the time dimension to a repo must not parse it out of the layer_id."""
+def test_a_layer_binds_by_layer_not_by_run():
     layer = si._bindings("layer", "local", "tree/repo/base")
-    assert layer.layer_id == "corpus:layer:tree/repo/base"
-    assert layer.run_id is None
-    assert layer.subject_id == "tree/repo/base"
+    assert layer.layer_id and layer.run_id is None and layer.subject_id is None
 
 
 def test_scope_comes_from_config_so_partitioning_needs_no_code_change():
