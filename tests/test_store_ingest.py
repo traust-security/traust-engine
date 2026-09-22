@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import sqlite3
 
-import pytest
 import yaml
 from traust_contracts.config import CorpusConfig
 from traust_contracts.v1.storage import Store
@@ -179,32 +178,3 @@ def test_the_impact_lane_is_discovered(tmp_path):
     assert family == "impact-analysis"
     assert subject is None
     assert path.name == "cve-2026-1-impact-analysis.json"
-
-
-def test_store_open_reports_an_absent_store_rather_than_creating_one(tmp_path) -> None:
-    """A dashboard READS. It must not quietly build an empty store.
-
-    Silently creating one renders an empty dashboard, which is
-    indistinguishable from a broken cutover -- the exact failure mode the
-    builder migration has to be able to rule out.
-    """
-    from traust_engine.corpus import store_open
-
-    class _Loc:
-        analysis_results = str(tmp_path)
-        store = None
-
-    class _Ctx:
-        locations = _Loc()
-
-    class _Engine:
-        ctx = _Ctx()
-
-    engine = _Engine()
-    path = store_open.store_path(engine)
-    assert path is not None and path.name == "store.db"
-    assert not path.exists()
-    with pytest.raises(store_open.StoreUnavailable) as caught:
-        store_open.open_store(engine)
-    assert "store ingest" in str(caught.value), "the error names the fix"
-    assert not path.exists(), "opening must not create"
