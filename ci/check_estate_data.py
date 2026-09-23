@@ -15,7 +15,8 @@ inside the contract itself, where every adopter reads it.
 Standalone by design: this repo does not depend on the harness, so the
 guard cannot live there. Keep the copies behaviourally identical.
 
-  --staged   scan only what is being committed (the pre-commit mode).
+  --staged   scan only the lines being ADDED (the pre-commit mode);
+             in a merge, only lines new to both parents.
              A public repo already carrying such figures cannot adopt a
              whole-tree gate without blocking every commit, and a gate
              people bypass is not a gate. Blocking what is ADDED stops
@@ -104,12 +105,84 @@ def is_public(root: Path) -> bool | None:
         return None
 
 
-def scan(root: Path, *, staged: bool = False) -> list[dict]:
-    args = ["diff", "--cached", "--name-only", "--diff-filter=ACM"] if staged else ["ls-files"]
-    findings = []
-    for rel in _git(root, *args):
-        if rel in ALLOWED or rel.endswith(SKIP_SUFFIXES):
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _merge_side_lines(root: Path, rel: str) -> set[str]:
+    """Lines of `rel` as committed on MERGE_HEAD; empty outside a merge.
+
+    A merge stages every line the other side changed, and that side has
+    already been through this gate (or predates it). Re-flagging it
+    blocks every upstream sync on debt nobody is adding -- which is what
+    blocked a CI branch merge. Only lines new to BOTH parents,
+    i.e. what the merge itself authors, are checked.
+    """
+    try:
+        _git(root, "rev-parse", "-q", "--verify", "MERGE_HEAD")
+        blob = _git(root, "show", f"MERGE_HEAD:{rel}")
+    except subprocess.CalledProcessError:
+        return set()
+    return set(blob)
+
+
+def _added_lines(root: Path) -> dict[str, list[tuple[int, str]]]:
+    """Staged ADDED lines per file, numbered as in the index.
+
+    `--staged` means "what this commit adds". Scanning the whole of each
+    touched file made a one-line fix to a file carrying old figures
+    unshippable, the very burndown-first trap the mode exists to avoid.
+    """
+    out = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--cached",
+            "-U0",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--diff-filter=ACM",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        errors="replace",
+    ).stdout
+    added: dict[str, list[tuple[int, str]]] = {}
+    rel, number, header = None, 0, False
+    for line in out.splitlines():
+        # File headers run from `diff --git` to the first hunk; inside a
+        # hunk, an added line that itself begins `++` looks like `+++`.
+        if line.startswith("diff --git "):
+            rel, header = None, True
             continue
+        if header:
+            if line.startswith("+++ b/"):
+                rel = line[6:]
+            elif hunk := HUNK_RE.match(line):
+                number, header = int(hunk.group(1)), False
+            continue
+        if hunk := HUNK_RE.match(line):
+            number = int(hunk.group(1))
+            continue
+        if rel and line.startswith("+"):
+            added.setdefault(rel, []).append((number, line[1:]))
+            number += 1
+    for rel in list(added):
+        theirs = _merge_side_lines(root, rel)
+        if theirs:
+            added[rel] = [(n, t) for n, t in added[rel] if t not in theirs]
+    return added
+
+
+def _whole_files(root: Path) -> dict[str, list[tuple[int, str]]]:
+    files: dict[str, list[tuple[int, str]]] = {}
+    for rel in _git(root, "ls-files"):
         path = root / rel
         if not path.is_file():
             continue
@@ -117,7 +190,16 @@ def scan(root: Path, *, staged: bool = False) -> list[dict]:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        for number, line in enumerate(text.splitlines(), 1):
+        files[rel] = list(enumerate(text.splitlines(), 1))
+    return files
+
+
+def scan(root: Path, *, staged: bool = False) -> list[dict]:
+    findings = []
+    for rel, lines in (_added_lines(root) if staged else _whole_files(root)).items():
+        if rel in ALLOWED or rel.endswith(SKIP_SUFFIXES):
+            continue
+        for number, line in lines:
             if WAIVER_RE.search(line):
                 continue
             probe = QUANTIFIER_RE.sub("", line)
