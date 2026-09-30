@@ -1,10 +1,20 @@
 version: 1
+defaults:
+  posture: privileged
 profiles:
+  validation-step-closed:
+    description: Validation adapter host steps, curl pinned to the lab hosts.
+    posture: restricted
+    allow: [curl, oc, jq]
+    allow_pipelines: true
+    keep_env_heads: [curl, oc]
+    curl_allowed_hosts: [api.hub.lab.example]
   validation-step:
     description: Validation adapter host steps.
     allow: [curl, oc, kubectl, jq, grep, base64, head, tail, tr, wc, cat, sleep, echo, printf]
     allow_pipelines: true
     keep_env: [KUBECONFIG, VF_OAUTH_TOKEN]
+    keep_env_heads: [curl, oc, kubectl]
   go-fuzz:
     description: Go fuzz build steps.
     allow: [go, make, gofmt, git]
