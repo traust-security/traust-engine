@@ -1,0 +1,28 @@
+# Migration profile — keys mirror the CLI flags. Every value is exactly what you
+# would otherwise pass to `migrate_cli`; explicit flags override the profile.
+#
+#   python -m traust_engine.corpus.migrate_cli run --profile migration.yaml
+#
+# Relative paths resolve against this file's directory.
+
+results-root: ./results-example # --results-root  (findings to import)
+config: ./corpus-config.yaml # --config        (deployment config: trees/scope)
+output: ./migration-output # --output        (base dir; plan/ and run/ subdirs)
+layer-destination: ledger # --layer-destination (ledger | storage)
+
+# Where the data is taken — the destination database. `type` picks the shape;
+# supply the connection info for that type.
+database:
+  type: postgres # postgres | sqlite
+  dsn-env: TRAUST_MIGRATION_DSN # postgres: env var holding the connection string
+  # dsn: postgresql://user:pass@host:5432/db   # postgres: literal (creds in file — avoid)
+  # path: ./artifact-store.sqlite               # sqlite: file path (new, nonexistent)
+
+# Source files to ignore, in addition to the config's migration.exclude.
+# Root-relative POSIX globs; `*` spans `/`.
+exclude:
+  - "_manifest/*"
+  - "*/candidate.json"
+
+# findings-db: ./reference.sqlite     # --findings-db  (optional parity snapshot)
+# max-seconds: 900                     # --max-seconds  (optional time budget)

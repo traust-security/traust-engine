@@ -17,7 +17,10 @@ class _Verifier:
 
     def verify(self, token: str) -> LayerActor:
         return LayerActor(
-            kind="human", identity="user:test", identity_verified=True, identity_provider="oidc"
+            kind="human",
+            identity="user:test",
+            identity_verified=True,
+            identity_provider="oidc",
         )
 
 
@@ -87,7 +90,8 @@ def test_fingerprint_distinguishes_cwe_and_location():
 
 def test_annotate_report_sets_fingerprint_and_profile():
     rep = _report(
-        "https://github.com/org/repo", [_finding("R-abc1234-001", "a.go", "CWE-287", "t")]
+        "https://github.com/org/repo",
+        [_finding("R-abc1234-001", "a.go", "CWE-287", "t")],
     )
     n = fi.annotate_report(rep)
     assert n == 2  # fingerprint + inferred audit_profile
@@ -121,10 +125,14 @@ def test_match_ladder_tiers():
         "https://github.com/org/repo",
         [
             # tier 1: same path+cwe -> same fingerprint
-            _finding("R-bbb2222-001", "auth.go", "CWE-287", "Sync endpoint unauthenticated"),
+            _finding(
+                "R-bbb2222-001", "auth.go", "CWE-287", "Sync endpoint unauthenticated"
+            ),
             # tier 2 candidate: same path, same cwe would be tier 1 — so make a
             # re-classified CWE at same path with near-identical title -> tier 3
-            _finding("R-bbb2222-002", "db.go", "CWE-943", "SQL injection in query builder"),
+            _finding(
+                "R-bbb2222-002", "db.go", "CWE-943", "SQL injection in query builder"
+            ),
             # brand new finding
             _finding("R-bbb2222-004", "new.go", "CWE-352", "CSRF"),
         ],
@@ -147,7 +155,8 @@ def test_rebaseline_writes_aliases_and_reviews(tmp_path):
         ],
     )
     new = _report(
-        "https://github.com/org/repo", [_finding("R-bbb2222-001", "auth.go", "CWE-287", "Unauth")]
+        "https://github.com/org/repo",
+        [_finding("R-bbb2222-001", "auth.go", "CWE-287", "Unauth")],
     )
     for rep in (old, new):
         fi.annotate_report(rep)
@@ -178,7 +187,8 @@ def test_rebaseline_migrates_superseded_claim_pins(tmp_path):
         ],
     )
     new = _report(
-        "https://github.com/org/repo", [_finding("R-bbb2222-001", "auth.go", "CWE-287", "Unauth")]
+        "https://github.com/org/repo",
+        [_finding("R-bbb2222-001", "auth.go", "CWE-287", "Unauth")],
     )
     new["metadata"]["commit"] = "bbb2222" + "0" * 33
     for rep in (old, new):
@@ -207,10 +217,12 @@ def test_rebaseline_batch_mode_keeps_unmatched_pins(tmp_path):
     # their claim pins must stay (the tamper guard would otherwise lose
     # its record without any parked disposition trail).
     old = _report(
-        "https://github.com/org/repo", [_finding("FIND-002", "gone.go", "CWE-798", "Key")]
+        "https://github.com/org/repo",
+        [_finding("FIND-002", "gone.go", "CWE-798", "Key")],
     )
     new = _report(
-        "https://github.com/org/repo", [_finding("R-bbb2222-001", "auth.go", "CWE-287", "Unauth")]
+        "https://github.com/org/repo",
+        [_finding("R-bbb2222-001", "auth.go", "CWE-287", "Unauth")],
     )
     for rep in (old, new):
         fi.annotate_report(rep)
@@ -275,7 +287,9 @@ def test_rebaseline_refuses_a_layer_outside_the_tree(tmp_path):
     outside.write_text(_layer())
 
     try:
-        fi.rebaseline(po, pn, outside, findings_root=tmp_path, ledger_service=_ledger(tmp_path))
+        fi.rebaseline(
+            po, pn, outside, findings_root=tmp_path, ledger_service=_ledger(tmp_path)
+        )
     except LayerPathOutsideRoot as e:
         assert "outside the allowed root" in str(e)
     else:
@@ -375,9 +389,9 @@ def test_annotated_report_still_validates_against_the_contract():
     }
     fi.annotate_report(rep)
     # Carry $defs so the finding's internal $refs resolve.
-    jsonschema.Draft202012Validator({"$ref": "#/$defs/finding", "$defs": schema["$defs"]}).validate(
-        rep["findings"][0]
-    )
+    jsonschema.Draft202012Validator(
+        {"$ref": "#/$defs/finding", "$defs": schema["$defs"]}
+    ).validate(rep["findings"][0])
 
 
 def _stamped_report(fingerprint_value: str) -> dict:
@@ -409,7 +423,9 @@ def test_annotate_refuses_to_move_an_existing_identity_when_asked():
     rep = _stamped_report("f" * 64)
     with pytest.raises(fi.IdentityMoved, match="orphans that history"):
         fi.annotate_report(rep, allow_identity_move=False)
-    assert rep["findings"][0]["fingerprint"] == "f" * 64, "must not mutate before refusing"
+    assert rep["findings"][0]["fingerprint"] == "f" * 64, (
+        "must not mutate before refusing"
+    )
 
     assert fi.annotate_report(rep, allow_identity_move=True) >= 1
     assert rep["findings"][0]["fingerprint"] != "f" * 64
@@ -489,7 +505,9 @@ def test_repo_candidates_offers_both_the_raw_and_repaired_spelling():
     wrapped = fi.repo_candidates({"metadata": {"repository": "<https://x/y>"}})
     assert wrapped == ["https://x/y", "<https://x/y>"]
     # No repair needed: one candidate, not a duplicate pair.
-    assert fi.repo_candidates({"metadata": {"repository": "https://x/y"}}) == ["https://x/y"]
+    assert fi.repo_candidates({"metadata": {"repository": "https://x/y"}}) == [
+        "https://x/y"
+    ]
 
 
 def test_attribute_pass_is_read_only_by_default(tmp_path, capsys):
@@ -509,7 +527,10 @@ def test_attribute_pass_is_read_only_by_default(tmp_path, capsys):
     assert report.read_text() == before, "a dry run must not write"
 
     assert fi.run_attribute(tmp_path, write=True) == 0
-    assert json.loads(report.read_text())["findings"][0]["fingerprint_algo"] == ALGO_VERSION
+    assert (
+        json.loads(report.read_text())["findings"][0]["fingerprint_algo"]
+        == ALGO_VERSION
+    )
 
 
 def test_attribute_never_touches_the_hash(tmp_path):
