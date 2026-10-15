@@ -11,11 +11,13 @@ statement about the code's shape, not a vulnerability: the audit must judge
 reachability, sanitization, and attacker control before promoting a fact to
 a finding, and must record dismissed facts in `scanner_correlation`.
 
-RULE PACKS ARE A SWAPPABLE INPUT, NEVER A BAKED-IN ASSET. Rules are fetched
-or referenced at run time and are deliberately NOT vendored into this
-repository — every currently available public pack carries licensing that
-restricts commercial redistribution (see docs/external-dependencies.md,
-"Commercialization assessment"). Sources accepted by --rules:
+THIRD-PARTY RULE PACKS ARE A SWAPPABLE INPUT, NEVER A BAKED-IN ASSET. They
+are fetched or referenced at run time and are deliberately NOT vendored into
+this repository — every currently available public pack carries licensing
+that restricts commercial redistribution (see docs/external-dependencies.md,
+"Commercialization assessment"). The one bundled pack is the Traust-authored
+pack: our own IP, shipped inside this package as the default (below).
+Sources accepted by --rules:
 
     /path/to/rules(.yaml|dir)      local rules, used as-is
     https://github.com/...[@SHA]   git repo, shallow-cloned to the cache at
