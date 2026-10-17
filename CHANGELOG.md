@@ -2,6 +2,24 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.32.0]
+
+- **The migration command line moves out of the package.** The engine is a
+  library: `tests/test_no_cli_entrypoints.py` forbids `argparse`, `def main`
+  and `__main__` blocks in `src/traust_engine`. `corpus/migrate_cli.py`
+  (2026-09-29) broke all three tests, which had failed on main ever since.
+  - `scripts/migrate.py` (outside the package) parses arguments and prints.
+    `make migrate-plan`, `make migrate-run` and `make migrate-inspect` run it
+    engine-locally, unchanged.
+  - `traust_engine.corpus.migrate` holds the logic as library functions:
+    `load_profile`, `resolve_options`, `inspect_summary`, `resolve_database`,
+    `prepare_output`, `execute`, `summary`, `exit_code`.
+  - `python -m traust_engine.corpus.migrate_cli` no longer exists; use
+    `uv run python scripts/migrate.py`. Flags, profile keys, output and exit
+    codes are unchanged.
+  - The old docstring named a `traust corpus migrate-postgres` wrapper; no
+    such command exists, and the reference is gone.
+
 ## [0.31.0]
 
 - **Nothing reads `progress-tracker/configs/` any more.** Deployment config

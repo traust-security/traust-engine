@@ -20,7 +20,7 @@ export TRAUST_MIGRATION_TEST_DATABASE_URL TRAUST_MIGRATION_DSN
 # Running the migration against real findings, engine-local (no downstream
 # traust dep). All per-run parameters live in one declarative profile file;
 # see migration.example.yaml. Override the path with MIGRATION_PROFILE=...
-MIGRATE := uv run --extra postgres --extra ledger-migration python -m traust_engine.corpus.migrate_cli
+MIGRATE := uv run --extra postgres --extra ledger-migration python scripts/migrate.py
 MIGRATION_PROFILE ?= migration.yaml
 
 .PHONY: help setup sync hooks lint lint-fix test db-up db-down db-test db-migration-reset migrate-plan migrate-run migrate-inspect check-release status bump $(BUMP_PARTS)

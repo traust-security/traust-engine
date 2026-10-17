@@ -1,7 +1,7 @@
 # Migration profile — keys mirror the CLI flags. Every value is exactly what you
-# would otherwise pass to `migrate_cli`; explicit flags override the profile.
+# would otherwise pass to `scripts/migrate.py`; explicit flags override the profile.
 #
-#   python -m traust_engine.corpus.migrate_cli run --profile migration.yaml
+#   uv run python scripts/migrate.py run --profile migration.yaml
 #
 # Relative paths resolve against this file's directory.
 

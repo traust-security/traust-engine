@@ -12,6 +12,7 @@ The same ingest-and-verify flow runs across both supported backends:
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import sqlite3
@@ -24,8 +25,17 @@ from urllib.parse import urlsplit, urlunsplit
 import pytest
 from test_migration_rehearsal import layer, put, setup
 
-from traust_engine.corpus import migrate_cli
 from traust_engine.corpus import migration_rehearsal as migration
+
+
+def _migrate_script():
+    """scripts/migrate.py, the engine-local entry point (outside the package)."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "migrate.py"
+    spec = importlib.util.spec_from_file_location("migrate_script", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 BOOTSTRAP_DSN = os.environ.get("TRAUST_MIGRATION_TEST_DATABASE_URL")
 
@@ -216,7 +226,7 @@ def test_cli_imports_layers_into_the_same_database_without_routing_options(
         f"database:\n  type: sqlite\n  path: {target}\n"
     )
 
-    assert migrate_cli.main(["run", "--profile", str(profile)]) == 0
+    assert _migrate_script().main(["run", "--profile", str(profile)]) == 0
     with sqlite3.connect(target) as conn:
         assert conn.execute("SELECT count(*) FROM layers").fetchone()[0] == 1
         assert conn.execute("SELECT count(*) FROM artifact_binding").fetchone()[0] == 0
