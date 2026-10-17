@@ -83,7 +83,7 @@ def owned_items_orm(Item, owner_name, session):
     return total
 
 
-def owned_items_sql(cursor, owner_name):
+def owned_items_sql(cursor, owner_name, folder):
     # ruleid: traust-python-injection-like-wildcard-unescaped
     cursor.execute("SELECT id FROM item WHERE name LIKE '" + owner_name + "+%'")
 
@@ -95,6 +95,15 @@ def owned_items_sql(cursor, owner_name):
 
     # ok: traust-python-injection-like-wildcard-unescaped
     cursor.execute("SELECT id FROM item WHERE name LIKE %s ESCAPE '\\'", (escape_like(owner_name) + "%",))
+
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("DELETE FROM item WHERE path LIKE ?", (f"{owner_name}/{folder}/%",))
+
+    # ruleid: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE path LIKE %s", [f"%{owner_name}/{folder}"])
+
+    # ok: traust-python-injection-like-wildcard-unescaped
+    cursor.execute("SELECT id FROM item WHERE path LIKE ?", (f"{owner_name}/{folder}",))
 
     # ok: traust-python-injection-like-wildcard-unescaped
     cursor.execute("SELECT id FROM item WHERE name = %s", (owner_name,))

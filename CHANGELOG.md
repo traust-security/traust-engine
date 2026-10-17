@@ -2,6 +2,25 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.28.0]
+
+- **Python rule pack v1.9: two misses from the `team-notes` recall-fixture
+  run.**
+  - `traust-python-injection-like-wildcard-unescaped` catches a bound
+    f-string parameter with an interpolation and a `%` anywhere in it
+    (`(f"{owner}/{folder}/%",)`).
+  - `traust-python-ssrf-request-taint` gains `request.get_json`,
+    `request.json.get`, `request.values.get` and `request.form[...]`
+    sources, and more `requests`/`httpx` sinks. A database fetch ends
+    request taint.
+  - New `traust-python-ssrf-stored-url` (CWE-918, low confidence) flags an
+    outbound call whose URL is a database row subscript or a url-type model
+    field. Operator config, settings, environment and API response objects
+    are excluded.
+  - On five estate repos, nothing outside these rules changed. The
+    fixture's two misses are now found. Two new candidates in
+    qontract-reconcile: Prometheus URLs from model fields.
+
 ## [0.27.0]
 
 - **Per-model cache rates and long-prompt pricing** (traust-contracts 0.59.0).

@@ -203,3 +203,16 @@ rules:
                 - pattern: f"%{$X}%"
                 - pattern: f"%{$X}"
           - pattern-not-regex: (?i)\bescape\b
+      # bound parameter that is an f-string with an interpolation and a %
+      # anywhere in it ("{owner}/{folder}/%"), in a tuple or list
+      - patterns:
+          - pattern-either:
+              - pattern: $CUR.execute("$SQL", $ARGS, ...)
+              - pattern: $CUR.executemany("$SQL", $ARGS, ...)
+          - metavariable-regex:
+              metavariable: $SQL
+              regex: '(?is).*(?<!\()\bi?like\s+(?:\x27|\x22|%s|%\(|\$\d|\?|:[a-z_]|\{(?![^}]*\}\s+(?:including|excluding))|concat\b|\|\|)'
+          - metavariable-regex:
+              metavariable: $ARGS
+              regex: '(?s).*\bf(?:\x22|\x27)[^\x22\x27]*(?:\{[^}]+\}[^\x22\x27]*%|%[^\x22\x27]*\{[^}]+\})'
+          - pattern-not-regex: (?i)\bescape\b

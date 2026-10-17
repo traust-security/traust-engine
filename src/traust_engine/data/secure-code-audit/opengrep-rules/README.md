@@ -99,6 +99,29 @@ until their facts are judged (`/mine-ledger`).
   signature-, MAC- or API-key-named operands. Literal and nil comparisons
   and metadata-named operands (`*_type`, `*_id`, `*_len`, …) are excluded.
 
+v1.9 (2026-10-16): **two misses from a recall-fixture run.**
+- `traust-python-injection-like-wildcard-unescaped` matches a bound
+  argument that's an f-string with an interpolation and a `%` anywhere in
+  it, inside a tuple or list: `(f"{owner}/{folder}/%",)`. Before this, only
+  `f"{x}%"`-shaped arguments matched.
+- `traust-python-ssrf-request-taint`:
+  - sources add `request.get_json(...)`, `request.json.get(...)`,
+    `request.values.get(...)` and `request.form[...]`
+  - sinks add the remaining `requests` verbs and `httpx.post`/`request`
+  - a database fetch (`fetchone`, `fetchall`, `first`, `one`, …) ends
+    request taint, because the value now comes from storage
+- New `traust-python-ssrf-stored-url` (CWE-918, WARNING, LOW): an outbound
+  call whose URL argument is a database row subscript or a model field with
+  a url-type name (`url`, `callback_url`, `webhookUrl`). A URL saved by one
+  request and fetched by another never appears as taint. Excluded:
+  - config, settings and environment lookups, because the operator sets
+    them
+  - API response objects (`links`, `resp`, `response`, `headers`)
+  - values from a variable assigned from `request` (the taint rule's case)
+
+  Whether anyone other than the operator can write the field is the
+  review's judgement.
+
 Engine note (v1.8): `metavariable-regex` is anchored at the start of the
 bound text, so a "contains" test needs a leading `.*` (`(?is).*\blike\b`),
 and it cannot sit directly under `pattern-either` — wrap each branch in
