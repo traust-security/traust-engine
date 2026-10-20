@@ -447,6 +447,8 @@ def lookup(
                 {
                     "osv_id": vid,
                     "aliases": vuln.get("aliases") or [],
+                    # Red Hat records list their CVEs here, not in aliases
+                    "upstream": vuln.get("upstream") or [],
                     "summary": vuln.get("summary") or (vuln.get("details") or "")[:200] or None,
                     "ecosystem": eco,
                     "package": name,

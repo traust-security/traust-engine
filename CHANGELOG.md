@@ -2,6 +2,35 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.35.0]
+
+- **Container images: language packages through OSV** (`adapters/osv_sbom.py`,
+  owner decision 2026-10-20, option b). It reads a **syft JSON** SBOM and
+  sends only language packages through the shared OSV client and the
+  pre-scan's `lookup`: npm, PyPI, Maven, Go modules including the Go
+  standard library, Cargo, RubyGems and NuGet. OS packages (rpm, deb, apk)
+  stay with grype and the distribution's security data.
+  - **A language package installed by an OS package is skipped**, using
+    syft's `ownership-by-file-overlap` relationships. A Red Hat RPM such as
+    `python3-urllib3` carries backported fixes under an unchanged upstream
+    version, so an upstream lookup would report CVEs it already fixes. On
+    `ubi9/python-311`, 216 of 218 language packages were RPM-installed.
+  - CycloneDX and SPDX are refused (`SbomFormatError`): they drop those
+    relationships.
+  - **Provenance** gives the same `status` (`complete` / `degraded` /
+    `failed`, with the fail-fast probe), plus what was skipped and why:
+    OS-installed (by type), unversioned (Go main modules), and
+    unsupported types (generic binaries, which grype matches by CPE).
+  - `mark_grype_duplicates` tags `also_in_grype` when grype reported the
+    same package (purl identity) and the same advisory (OSV id, alias or
+    upstream id).
+  - **Air-gapped:** `write_cyclonedx` and `run_offline` give the filtered
+    packages to osv-scanner offline (`-L <file>.cdx.json --offline`), and
+    `parse_offline` restores the image paths. On external-secrets v0.9.0
+    this matched the API exactly (205/205).
+- **`lookup` candidates carry `upstream`**: Red Hat OSV records list
+  their CVEs there, not in `aliases`.
+
 ## [0.34.0]
 
 - **The harness no longer fetches or tracks osv-scanner's offline
