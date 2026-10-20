@@ -202,3 +202,30 @@ def test_offline_round_trip(tmp_path):
 def test_write_cyclonedx_needs_the_cdx_name(tmp_path):
     with pytest.raises(ValueError, match=r"\.cdx\.json"):
         m.write_cyclonedx({}, tmp_path / "x.json")
+
+
+def test_grype_matches_on_os_installed_packages_are_listed_with_their_owner():
+    grype = {
+        "matches": [
+            {
+                "artifact": {
+                    "type": "python",
+                    "purl": "pkg:pypi/urllib3@1.26.5",
+                    "locations": [{"path": "/usr/lib/python3.9/site-packages/urllib3"}],
+                },
+                "vulnerability": {"id": "GHSA-38jv", "severity": "High"},
+            },
+            {  # not OS-installed: a real candidate
+                "artifact": {"type": "python", "purl": "pkg:pypi/requests@2.19.0"},
+                "vulnerability": {"id": "GHSA-x84v", "severity": "Medium"},
+            },
+            {  # an RPM itself is grype's own business
+                "artifact": {"type": "rpm", "purl": "pkg:rpm/redhat/python3-urllib3@1.26.5"},
+                "vulnerability": {"id": "CVE-2023-1", "severity": "Low"},
+            },
+        ]
+    }
+    (row,) = m.grype_os_installed_matches(grype, SYFT)
+    assert row["package"] == "urllib3"
+    assert row["installed_by"] == ["x"]  # the owning artifact's name
+    assert row["paths"] == ["/usr/lib/python3.9/site-packages/urllib3"]

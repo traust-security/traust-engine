@@ -24,6 +24,12 @@ All notable changes to traust-engine are documented here.
   - `mark_grype_duplicates` tags `also_in_grype` when grype reported the
     same package (purl identity) and the same advisory (OSV id, alias or
     upstream id).
+  - `grype_os_installed_matches` lists grype's own matches on language
+    packages an OS package installed, with the owning packages. grype
+    applies file ownership only partly, even on syft JSON: on
+    `ubi9/python-311`, 26 of its 32 language-package matches (1 critical,
+    12 high) were against packages the nodejs, npm and
+    python3.11-setuptools RPMs installed.
   - **Air-gapped:** `write_cyclonedx` and `run_offline` give the filtered
     packages to osv-scanner offline (`-L <file>.cdx.json --offline`), and
     `parse_offline` restores the image paths. On external-secrets v0.9.0

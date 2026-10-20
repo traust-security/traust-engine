@@ -20,6 +20,8 @@ which CycloneDX output drops, hence the syft JSON input. On
 ``mark_grype_duplicates`` tags each candidate that grype also reported for
 the same package (same purl identity) and the same advisory (by OSV id,
 alias or upstream id), so a report adds only what OSV found beyond grype.
+``grype_os_installed_matches`` lists grype's own matches on OS-installed
+language packages, which grype reports even from syft JSON.
 
 Air-gapped deployments run osv-scanner offline instead: ``write_cyclonedx``
 writes the filtered packages as a CycloneDX file osv-scanner reads with
@@ -199,6 +201,53 @@ def mark_grype_duplicates(candidates: list[dict], grype_doc: dict) -> dict:
         c["also_in_grype"] = hit
         dup += hit
     return {"also_in_grype": dup, "osv_only": len(candidates) - dup}
+
+
+def os_installed_owners(doc: dict) -> dict[tuple[str, str, str], list[str]]:
+    """Language package (purl identity) -> the OS packages that installed it."""
+    artifacts = {a.get("id"): a for a in doc.get("artifacts") or [] if isinstance(a, dict)}
+    owners: dict[tuple[str, str, str], set[str]] = {}
+    for r in doc.get("artifactRelationships") or []:
+        parent = artifacts.get(r.get("parent")) or {}
+        if r.get("type") != OWNERSHIP or parent.get("type") not in OS_PACKAGE_TYPES:
+            continue
+        key = parse_purl((artifacts.get(r.get("child")) or {}).get("purl") or "")
+        if key:
+            owners.setdefault(key, set()).add(parent.get("name") or "")
+    return {k: sorted(v - {""}) for k, v in owners.items()}
+
+
+def grype_os_installed_matches(grype_doc: dict, doc: dict) -> list[dict]:
+    """grype matches on language packages an OS package installed.
+
+    grype applies file ownership only partly, even on syft JSON: on
+    ``ubi9/python-311`` 26 of its 32 language-package matches (1 critical,
+    12 high: npm's bundled ``tar``, ``brace-expansion``…, owned by the
+    ``nodejs``/``npm`` RPMs) were against RPM-installed packages. Their fixes
+    arrive in the owning RPM, so the upstream advisory is not evidence on its
+    own: the owner's own advisory state is.
+    """
+    owners = os_installed_owners(doc)
+    out = []
+    for m in grype_doc.get("matches") or []:
+        art, vuln = m.get("artifact") or {}, m.get("vulnerability") or {}
+        if art.get("type") in OS_PACKAGE_TYPES:
+            continue
+        key = parse_purl(art.get("purl") or "")
+        if key not in owners:
+            continue
+        out.append(
+            {
+                "id": vuln.get("id"),
+                "severity": vuln.get("severity"),
+                "ecosystem": key[0],
+                "package": key[1],
+                "version": key[2],
+                "paths": [loc.get("path") for loc in art.get("locations") or [] if loc.get("path")],
+                "installed_by": owners[key],
+            }
+        )
+    return sorted(out, key=lambda x: (x["package"], x["version"], x["id"] or ""))
 
 
 # -- air-gapped: osv-scanner offline on the filtered packages ------------------
