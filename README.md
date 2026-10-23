@@ -27,6 +27,14 @@ ownership model (contract / resolution / consumer) is documented in
 `traust/docs/architecture.md` → *Configuration & context*; the runtime paths this
 engine reads from `locations.yaml` are in *Runtime configuration* below.
 
+Typed adapter `scan()` results are scanner observations validated against
+`adapter-result.schema.json`, not authored audit findings. Unreported CWEs,
+description and remediation stay empty; adapters do not supply validity
+verdicts. Scanner identity lives in `metadata.tool`; native fingerprints remain
+in raw scanner candidates, not the domain finding fingerprint. Supplied
+Finding metadata and declared workflow origins are preserved, and an explicit
+unknown severity raises rather than becoming `low`.
+
 ## Install
 
 Private Git (after tags are published):

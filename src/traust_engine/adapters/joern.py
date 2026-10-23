@@ -474,7 +474,6 @@ def _targets_to_findings(targets: list[dict]) -> list[dict[str, Any]]:
                         f"kind={target.get('kind')}"
                     ),
                     "category": target.get("kind", ""),
-                    "origin": "joern",
                 }
             )
     return findings

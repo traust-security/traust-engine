@@ -359,7 +359,6 @@ def _facts_to_findings(facts: list[dict]) -> list[dict[str, Any]]:
                     f"carrier_path={fact.get('carrier_path')}"
                 ),
                 "category": fact.get("category", ""),
-                "origin": "yara",
             }
         )
     return findings
