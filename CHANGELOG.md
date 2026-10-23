@@ -2,6 +2,29 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.42.1]
+
+- **Fix: release and version-bump commits are recognized in conventional-commit
+  form**, so the real fix wins the fix choice. The Phase 3 acceptance run
+  showed the pattern missed many real subjects, among them:
+  - `chore: bump version to 2.131.0 [skip ci]`
+  - `bump for 41.0.2`
+  - `chore(release): prepare release 1.18.0`
+  - `chore(release): v1.13.2`
+  - `Bumped v8.9.0`
+  - `chore(master): release 10.0.5`
+
+  As a result, 8 of 45 packets carried a version bump (or a README edit) as
+  their fix. The subject pattern now:
+  - accepts an optional `[branch]` tag and conventional-commit type;
+  - treats a `(release)` scope as a release;
+  - counts "release" and "bump" only when a version follows, so "Release the
+    lock" and "bump lodash from 4.17.20 to 4.17.21" aren't releases.
+
+  A change touching only markdown or reStructuredText files is release-like
+  too. On the same 45 packets, no release commit is chosen now, and those 8
+  get the real fix commit.
+
 ## [0.42.0]
 
 - **`traust_engine.applicability` covers npm, Maven and Cargo** as well as Go
