@@ -45,15 +45,19 @@ def normalize_base_url(url: str | None) -> str:
 
 @dataclass(frozen=True)
 class Query:
-    """One package version to look up. ``ecosystem`` is OSV's name (``PyPI``, ``npm``…)."""
+    """One package version to look up. ``ecosystem`` is OSV's name (``PyPI``, ``npm``…).
+
+    With ``version`` None the query asks for every advisory naming the package.
+    """
 
     ecosystem: str
     name: str
-    version: str
+    version: str | None
 
     def body(self, page_token: str | None = None) -> dict:
         doc: dict = {"package": {"name": self.name, "ecosystem": self.ecosystem}}
-        doc["version"] = self.version
+        if self.version is not None:
+            doc["version"] = self.version
         if page_token:
             doc["page_token"] = page_token
         return doc

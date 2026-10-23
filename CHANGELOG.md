@@ -2,6 +2,37 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.41.0]
+
+- **New: `traust_engine.applicability`, below-range evidence packets** (CVE
+  identification plan, Phase 3; Go and PyPI first). An advisory's ranges often
+  stop at a support or testing boundary rather than where the code changed, so
+  an installed version below the stated start can still carry the vulnerable
+  code. `build(repo, out)` finds those versions and writes the facts a review
+  needs. It writes no verdicts.
+  - **Candidates:** every exact install (locked or declared) is checked against
+    every OSV advisory naming the package. A version is a candidate when it is
+    below every span's explicit `introduced` (`below_range`) or between two
+    spans (`gap`). A CVE with several records (GHSA, PYSEC, GO-) is one
+    candidate.
+  - **Fix choice:** references are ranked GIT `fixed` commit, then `FIX`, then
+    other commit or PR links, and alias records (the CVE record often carries
+    the fix commits) are included. Each patch is scored on files present in the
+    installed tree, whether its message names the advisory, and whether it only
+    adds code (the shape of a feature introduction). A bundle is narrowed to the
+    commits that name the advisory. The choice and every alternative are
+    recorded.
+  - **Installed source:** fetched from the registry (proxy.golang.org; PyPI
+    sdist, falling back to the wheel) on allow-listed hosts only, with checked
+    redirects, size caps and safe extraction. Nothing fetched is executed.
+  - **Matching:** patch paths are anchored by stripping a consistent prefix,
+    never by base name alone. Per hunk, the packet counts the removed and added
+    lines present in the installed file.
+  - **Accounting:** every candidate is a packet or a coverage gap with its
+    reason, and a mismatch raises.
+- `osv.Query.version` may be None: the query then asks for every advisory
+  naming the package.
+
 ## [0.40.0]
 
 - **Fix: the OSV fixed version now depends on the installed version.**
