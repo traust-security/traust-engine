@@ -72,6 +72,31 @@ def _bind_safe_exec_profiles(request):
     _safe_exec_module.reset_profiles()
 
 
+def _clear_git_repo_env() -> None:
+    """Drop git's repo-local variables (GIT_DIR, GIT_WORK_TREE, ...) for the run.
+
+    A hook runs with GIT_DIR pointing at this repository; with it set, a test's
+    `git init <tmp>` re-initializes this repository and writes core.bare = true
+    into its shared config. The pre-push hook clears them too; this covers any
+    other runner that inherits them.
+    """
+    try:
+        names = subprocess.run(
+            ["git", "rev-parse", "--local-env-vars"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.split()
+    except Exception:
+        names = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"]
+    for name in names:
+        os.environ.pop(name, None)
+
+
+_clear_git_repo_env()
+
+
 def _can_git_init():
     probe = None
     try:
