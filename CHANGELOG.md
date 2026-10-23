@@ -2,6 +2,30 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.42.0]
+
+- **`traust_engine.applicability` covers npm, Maven and Cargo** as well as Go
+  and PyPI (CVE identification plan, Phase 3).
+  - **Installed source:** npm tarballs from `registry.npmjs.org`, Maven
+    `-sources.jar` from `repo1.maven.org` (a missing sources jar is a
+    `source_unavailable` gap), and `.crate` files from `static.crates.io`.
+  - **Which versions count as installed** (`packet.exact`):
+    - a lockfile version always does;
+    - a manifest version without one (`manifest-floor`) counts for Maven
+      (pom.xml versions are the ones used), for Go, and for npm when it is a
+      full x.y.z (`"1.2"` means 1.2.x);
+    - it never counts for Cargo (`Cargo.toml` `"1"` means `^1`) or Python
+      (a floor);
+    - resolved and defaulted versions never count.
+  - **Path anchoring** strips up to 6 leading components, so a Maven
+    module's `<module>/src/main/java/` reaches the sources jar's package
+    paths.
+  - **`Fetcher.redirects`** is configurable, like `forges` and `registries`,
+    so the caller's feeds configuration decides every host.
+  - **User-Agent:** `traust-applicability
+    (+https://github.com/traust-security/traust)`, because crates.io asks
+    bots to identify themselves with contact details.
+
 ## [0.41.1]
 
 - **Fix: pushing from a git worktree no longer turns the main clone bare.**

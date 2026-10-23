@@ -16,7 +16,8 @@ from pathlib import Path
 
 from traust_engine.applicability.fixes import FileChange
 
-MAX_STRIP = 3
+# a Maven module's sources sit under <module>/src/main/java/ in the repository
+MAX_STRIP = 6
 
 
 def root_of(tree: Path) -> Path:
