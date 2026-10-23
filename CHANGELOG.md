@@ -2,7 +2,7 @@
 
 All notable changes to traust-engine are documented here.
 
-## [0.41.1]
+## [0.41.2]
 
 - Repair typed adapter observations for the adapter-result contract: preserve
   supplied Finding metadata, reject unknown severities, and keep scanner names
@@ -12,6 +12,21 @@ All notable changes to traust-engine are documented here.
   artifacts against their schema without authored-audit cross-checks.
 - Add a real Gitleaks regression over the bundled synthetic canary, including
   encrypted Vault payloads, through typed serialization and contract validation.
+
+## [0.41.1]
+
+- **Fix: pushing from a git worktree no longer turns the main clone bare.**
+  Git gives a hook this repository's `GIT_DIR` (in a worktree,
+  `<main>/.git/worktrees/<name>`). The pre-push hook ran the tests with it
+  set, so the test fixture's `git init <tmp>` re-initialized this repository
+  instead and wrote `core.bare = true` into the config every worktree shares.
+  The main clone then failed with "this operation must be run in a work
+  tree".
+  - The hook now clears git's repo-local variables
+    (`git rev-parse --local-env-vars`) before the tests run.
+  - `tests/conftest.py` drops them too, for any other runner.
+  - `tests/test_git_env_isolation.py` reproduces the failure and checks the
+    guard.
 
 ## [0.41.0]
 
