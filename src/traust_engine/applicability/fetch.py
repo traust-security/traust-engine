@@ -5,7 +5,8 @@ attacker-influenced. Nothing is fetched unless its host is on an allow-list, a
 redirect must stay on the list, sizes are capped, and archives are extracted
 with path and link checks. Nothing fetched is ever executed.
 
-The default allow-lists are the plan's D3 default; callers may pass their own.
+The defaults below are what an embedder gets; traust passes the hosts its
+feeds.yaml names (decision D3: sources are configured like every other feed).
 """
 
 from __future__ import annotations
@@ -17,12 +18,21 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 
 FORGES = frozenset({"github.com", "gitlab.com"})
-REGISTRIES = frozenset({"proxy.golang.org", "pypi.org", "files.pythonhosted.org"})
+REGISTRIES = frozenset(
+    {
+        "proxy.golang.org",
+        "pypi.org",
+        "files.pythonhosted.org",
+        "registry.npmjs.org",
+        "repo1.maven.org",
+        "static.crates.io",
+    }
+)
 # Hosts a fetch may be redirected to, keyed by the host it started on.
 REDIRECTS = {
     "github.com": frozenset({"patch-diff.githubusercontent.com"}),
@@ -30,7 +40,8 @@ REDIRECTS = {
     "proxy.golang.org": frozenset({"storage.googleapis.com"}),
 }
 MAX_BYTES = 200 * 1024 * 1024
-USER_AGENT = "traust-applicability"
+# crates.io asks bots to identify themselves with contact details.
+USER_AGENT = "traust-applicability (+https://github.com/traust-security/traust)"
 
 Transport = Callable[[str], tuple[bytes, str]]  # url -> (body, final url)
 
@@ -52,6 +63,7 @@ class Fetcher:
 
     forges: frozenset[str] = FORGES
     registries: frozenset[str] = REGISTRIES
+    redirects: dict[str, frozenset[str]] = field(default_factory=lambda: dict(REDIRECTS))
     transport: Transport = _urllib
 
     def get(self, url: str, allowed: frozenset[str]) -> bytes:
@@ -61,7 +73,7 @@ class Fetcher:
             raise FetchRefused(f"host not allowed: {host or url}")
         body, final = self.transport(url)
         final_host = urllib.parse.urlsplit(final).hostname or ""
-        if final_host != host and final_host not in REDIRECTS.get(host, frozenset()):
+        if final_host != host and final_host not in self.redirects.get(host, frozenset()):
             raise FetchRefused(f"redirected off the allow-list: {host} -> {final_host}")
         if len(body) > MAX_BYTES:
             raise FetchRefused("body over the size cap")
@@ -93,6 +105,17 @@ class Fetcher:
                 raise FetchRefused(f"no sdist or wheel for {name} {version}")
             kind = "zip" if pick["filename"].endswith((".zip", ".whl")) else "tar"
             return pick["url"], kind
+        if ecosystem == "npm":
+            base = name.rsplit("/", 1)[-1]
+            return f"https://registry.npmjs.org/{name}/-/{base}-{version}.tgz", "tar"
+        if ecosystem == "crates.io":
+            return f"https://static.crates.io/crates/{name}/{name}-{version}.crate", "tar"
+        if ecosystem == "Maven":
+            group, _, artifact = name.partition(":")
+            if not group or not artifact:
+                raise FetchRefused(f"not a Maven group:artifact: {name}")
+            base = f"https://repo1.maven.org/maven2/{group.replace('.', '/')}/{artifact}/{version}"
+            return f"{base}/{artifact}-{version}-sources.jar", "zip"
         raise FetchRefused(f"ecosystem not supported yet: {ecosystem}")
 
 

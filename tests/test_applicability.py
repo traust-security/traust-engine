@@ -354,3 +354,55 @@ def test_release_commits_are_recognised():
     assert not release_like(
         real, [FileChange("django/utils/html.py", [{"removed": ["a"], "added": ["b"]}])]
     )
+
+
+# ----------------------------------------------------------------- npm, Maven, Cargo
+
+
+def test_registry_urls_for_npm_maven_and_cargo():
+    f = Fetcher()
+    assert f.source_url("npm", "@scope/pkg", "1.2.3") == (
+        "https://registry.npmjs.org/@scope/pkg/-/pkg-1.2.3.tgz",
+        "tar",
+    )
+    assert f.source_url("crates.io", "tokio", "1.38.0") == (
+        "https://static.crates.io/crates/tokio/tokio-1.38.0.crate",
+        "tar",
+    )
+    assert f.source_url("Maven", "com.fasterxml.jackson.core:jackson-databind", "2.13.4") == (
+        "https://repo1.maven.org/maven2/com/fasterxml/jackson/core/jackson-databind/2.13.4/"
+        "jackson-databind-2.13.4-sources.jar",
+        "zip",
+    )
+    with pytest.raises(FetchRefused):
+        f.source_url("Maven", "no-group", "1.0")
+
+
+def test_exact_installs_per_ecosystem():
+    from traust_engine.applicability.packet import exact
+
+    assert exact("crates.io", "1.38.0", "locked") and not exact("crates.io", "1", "manifest-floor")
+    assert exact("npm", "4.17.21", "manifest-floor") and not exact("npm", "4.17", "manifest-floor")
+    assert exact("Maven", "2.13.4", "manifest-floor") and exact("Go", "1.4.0", "manifest-floor")
+    assert not exact("PyPI", "2.2", "manifest-floor") and exact("PyPI", "2.2.2", "locked")
+    assert not exact("PyPI", "2.2.2", "resolved") and not exact("Go", "1.22.0", "go-directive")
+
+
+def test_maven_sources_anchor_below_the_module_source_root(tmp_path):
+    (tmp_path / "com" / "ex").mkdir(parents=True)
+    (tmp_path / "com" / "ex" / "Parser.java").write_text("x")
+    files = [FileChange("core/src/main/java/com/ex/Parser.java")]
+    strip, found = anchor(files, tmp_path)
+    assert strip == 4 and set(found) == {"core/src/main/java/com/ex/Parser.java"}
+
+
+def test_redirects_are_configurable():
+    f = Fetcher(
+        transport=lambda u: (b"x", "https://mirror.example/blob"),
+        redirects={"pypi.org": frozenset({"mirror.example"})},
+    )
+    assert f.get("https://pypi.org/x", f.registries) == b"x"
+    with pytest.raises(FetchRefused):
+        Fetcher(transport=lambda u: (b"x", "https://mirror.example/blob")).get(
+            "https://pypi.org/x", f.registries
+        )
