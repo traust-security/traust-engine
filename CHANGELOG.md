@@ -26,6 +26,21 @@ All notable changes to traust-engine are documented here.
     (+https://github.com/traust-security/traust)`, because crates.io asks
     bots to identify themselves with contact details.
 
+## [0.41.1]
+
+- **Fix: pushing from a git worktree no longer turns the main clone bare.**
+  Git gives a hook this repository's `GIT_DIR` (in a worktree,
+  `<main>/.git/worktrees/<name>`). The pre-push hook ran the tests with it
+  set, so the test fixture's `git init <tmp>` re-initialized this repository
+  instead and wrote `core.bare = true` into the config every worktree shares.
+  The main clone then failed with "this operation must be run in a work
+  tree".
+  - The hook now clears git's repo-local variables
+    (`git rev-parse --local-env-vars`) before the tests run.
+  - `tests/conftest.py` drops them too, for any other runner.
+  - `tests/test_git_env_isolation.py` reproduces the failure and checks the
+    guard.
+
 ## [0.41.0]
 
 - **New: `traust_engine.applicability`, below-range evidence packets** (CVE
