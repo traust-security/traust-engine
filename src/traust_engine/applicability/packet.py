@@ -38,8 +38,31 @@ from traust_engine.applicability.fixes import (
 from traust_engine.applicability.matching import anchor, presence, root_of
 from traust_engine.osv import OsvClient, Query
 
-SUPPORTED = ("Go", "PyPI")
-EXACT_BASES = ("locked", "declared")
+SUPPORTED = ("Go", "PyPI", "npm", "Maven", "crates.io")
+FULL_VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.+-]*)?")
+
+
+def exact(ecosystem: str, version: str, basis: str | None) -> bool:
+    """Whether the dependency pre-scan's version is the one installed.
+
+    A lockfile always is (`locked`). A version read from a manifest without one
+    (`manifest-floor`) depends on the ecosystem:
+    - a pom.xml version is the version Maven uses, and go.mod lists the
+      selected versions: both exact;
+    - a package.json pin is exact only as a full x.y.z ("1.2" means 1.2.x);
+    - a Cargo.toml version is a caret requirement ("1" means ^1), and a Python
+      manifest version is a floor: neither is the installed version.
+    Resolved and defaulted versions are approximations, never exact.
+    """
+    if basis == "locked":
+        return True
+    if basis != "manifest-floor":
+        return False
+    if ecosystem in ("Maven", "Go"):
+        return True
+    if ecosystem == "npm":
+        return bool(FULL_VERSION.fullmatch(version))
+    return False
 
 
 def installed(
@@ -51,8 +74,8 @@ def installed(
     for (eco, name, version), entry in sorted(packages.items()):
         if eco not in ecosystems:
             skipped[f"ecosystem:{eco}"] += 1
-        elif entry.get("version_basis") not in EXACT_BASES:
-            skipped[f"basis:{entry.get('version_basis')}"] += 1
+        elif not exact(eco, version, entry.get("version_basis")):
+            skipped[f"basis:{eco}:{entry.get('version_basis')}"] += 1
         else:
             keep.append((eco, name, version))
     return keep, skipped
