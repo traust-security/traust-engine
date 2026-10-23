@@ -1,0 +1,71 @@
+# Arms GitHub's native auto-merge so a green PR lands unattended: the required
+# checks gate it, no human click. Arming belongs to people with write access:
+#   - apply the `automerge` label (labelling needs triage or better), or
+#   - tick the test checkbox in the PR body -
+#       "- [x] A person reviewed each changed test and the behaviour change is intended"
+#       "- [x] No existing test changed" / "- [x] Tests change only on purpose"
+#     honoured only for OWNER / MEMBER / COLLABORATOR authors, so an outside
+#     contributor cannot arm their own merge by typing.
+# Merge commit only, matching the repo convention (pins point at PR commits).
+# Never disarms: undoing is the UI's "Disable auto-merge", so a PR armed by hand
+# is never clobbered by a body edit.
+#
+# pull_request_target: a write token for fork PRs too. Safe because nothing is
+# checked out - the body is only pattern-matched, never evaluated.
+#
+# Takes effect once this file is on the base branch: pull_request_target runs the
+# workflow from the base, not from the PR.
+name: auto-merge
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, ready_for_review, synchronize, labeled]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  arm:
+    if: >-
+      github.event.pull_request.state == 'open' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.ref == 'development'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Arm auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          case ",$LABELS," in *,automerge,*) labelled=yes ;; *) labelled=no ;; esac
+          ticked=no
+          if grep -qiE '^- \[[xX]\].*(a person reviewed each changed test|no existing tests? (changed|were edited)|tests? change only on purpose)' <<<"${BODY:-}"; then
+            ticked=yes
+          fi
+
+          if [ "$labelled" = no ] && [ "$ticked" = no ]; then
+            echo "not armed: no automerge label and no test checkbox ticked"
+            exit 0
+          fi
+          if [ "$labelled" = no ] && ! grep -qE '^(OWNER|MEMBER|COLLABORATOR)$' <<<"$AUTHOR_ASSOCIATION"; then
+            echo "not armed: checkbox ticked by $AUTHOR_ASSOCIATION; needs the automerge label from a maintainer"
+            exit 0
+          fi
+
+          if [ "$(gh pr view "$PR" --json autoMergeRequest --jq '.autoMergeRequest != null')" = "true" ]; then
+            echo "auto-merge already enabled on #$PR"
+            exit 0
+          fi
+          gh pr merge "$PR" --auto --merge
+          echo "auto-merge armed on #$PR: merge commit, lands when the required checks pass"
