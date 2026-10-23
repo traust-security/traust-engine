@@ -6,6 +6,14 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# Git hands a hook this repository's GIT_DIR (in a worktree:
+# <main>/.git/worktrees/<name>). With it set, a test's `git init <tmp>`
+# re-initializes this repository instead and writes core.bare = true into
+# the config every worktree shares, so the main clone stops working. Clear
+# git's repo-local variables before the tests run.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 if ! command -v uv >/dev/null 2>&1; then
   echo "pre-push: uv not found — install uv, then run: make setup" >&2
   exit 1
