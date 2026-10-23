@@ -1,0 +1,30 @@
+name: probe
+on: pull_request
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: token capabilities
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -uo pipefail
+          probe() {
+            local label="$1" path="$2"
+            local code
+            code=$(curl -s -o /tmp/out -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'Accept: application/vnd.github+json' "https://api.github.com$path")
+            printf '%-58s %s %s\n' "$label" "$code" "$(head -c 120 /tmp/out | tr -d '\n')"
+          }
+          probe "collaborators/smith-xyz/permission" "/repos/$GITHUB_REPOSITORY/collaborators/smith-xyz/permission"
+          probe "collaborators/smith-xyz (existence)" "/repos/$GITHUB_REPOSITORY/collaborators/smith-xyz"
+          probe "orgs/members/smith-xyz" "/orgs/traust-security/members/smith-xyz"
+          probe "orgs/public_members/smith-xyz" "/orgs/traust-security/public_members/smith-xyz"
+          probe "users/smith-xyz/orgs" "/users/smith-xyz/orgs"
+          probe "pulls/N (author_association)" "/repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER"
+          probe "teams (org teams)" "/orgs/traust-security/teams"
+          probe "collaborators list" "/repos/$GITHUB_REPOSITORY/collaborators?per_page=100"
