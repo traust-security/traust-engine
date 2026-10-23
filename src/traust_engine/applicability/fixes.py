@@ -9,7 +9,8 @@ chosen, not assumed:
   then other commit or pull-request links;
 - each patch is scored on whether it touches source files present in the
   installed tree, whether its commit message names the advisory, and whether it
-  only adds code (the shape of a feature introduction);
+  only adds code (the shape of a feature introduction), and whether it is a
+  release or version-bump commit (a fix's release, not the fix);
 - a bundle is narrowed to the commits that name the advisory, when any do.
 
 The choice and every alternative's score are recorded, so a reviewer can see why.
@@ -137,6 +138,26 @@ def narrow(commits: list[Commit], ids: set[str]) -> list[Commit]:
     """The commits of a bundle that name the advisory, or all of them if none do."""
     named = [c for c in commits if any(i in c.message for i in ids)]
     return named or commits
+
+
+RELEASE_SUBJECT = re.compile(
+    r"^(?:\[[^\]]*\]\s*)?(?:bump(?:ed)? (?:the )?version|release|prepare (?:for )?release|"
+    r"version bump|v?\d+\.\d+(?:\.\d+)*(?:\s|$))",
+    re.IGNORECASE,
+)
+RELEASE_FILES = re.compile(
+    r"(^|/)(__init__\.py|_version\.py|version\.py|setup\.(py|cfg)|pyproject\.toml|package\.json|"
+    r"go\.mod|go\.sum|VERSION|CHANGE(LOG|S)[^/]*|HISTORY[^/]*|NEWS[^/]*)$|(^|/)docs?/",
+    re.IGNORECASE,
+)
+
+
+def release_like(commits: list[Commit], files: list[FileChange]) -> bool:
+    """True for a release or version-bump commit: a release subject, or every
+    changed file a version, packaging, changelog or docs file."""
+    if commits and all(RELEASE_SUBJECT.search(c.subject) for c in commits):
+        return True
+    return bool(files) and all(RELEASE_FILES.search(f.path) for f in files)
 
 
 def only_adds(files: list[FileChange]) -> bool:

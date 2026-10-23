@@ -33,6 +33,7 @@ from traust_engine.applicability.fixes import (
     parse_mbox,
     patch_url,
     references,
+    release_like,
 )
 from traust_engine.applicability.matching import anchor, presence, root_of
 from traust_engine.osv import OsvClient, Query
@@ -130,7 +131,8 @@ def choose_fix(
         files = [f for c in commits for f in c.files]
         _strip, found = anchor(files, root)
         named = any(i in c.message for c in commits for i in ids)
-        score = (len(found) > 0, named, not only_adds(files), -rank, len(found))
+        release = release_like(commits, files)
+        score = (not release, len(found) > 0, named, not only_adds(files), -rank, len(found))
         tried.append(
             {
                 "url": url,
@@ -140,6 +142,7 @@ def choose_fix(
                 "files_in_installed_tree": len(found),
                 "names_advisory": named,
                 "only_adds_code": only_adds(files),
+                "release_commit": release,
                 "_score": score,
                 "_files": files,
                 "_text": text,

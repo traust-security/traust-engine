@@ -26,7 +26,7 @@ class Candidate:
     package: str
     version: str
     advisory_id: str
-    kind: str  # BELOW_RANGE: under every span's start; GAP: between two spans
+    kind: str  # BELOW_RANGE: under every span's start; GAP: after an unfixed span, before the next
     stated_start: str  # the lowest explicit `introduced`, or the next span's start for a gap
     major_distance: int | None
     aliases: tuple[str, ...] = field(default_factory=tuple)
@@ -103,14 +103,22 @@ def classify(vuln: dict, ecosystem: str, name: str, version: str) -> Candidate |
             (lowest_key[0] - have[0]) if lowest_key and have else None,
             aliases,
         )
-    ends = [
+    # A gap counts only after a span that ends at `last_affected`: that line was
+    # left without a known fix, so a later version below the next span's start
+    # may still carry the code. After a `fixed` end the version is simply fixed.
+    open_ends = [
         k
         for s in ss
-        if (s.fixed or s.last_affected)
-        and (k := version_key(s.fixed or s.last_affected, ecosystem)) is not None
+        if s.last_affected
+        and not s.fixed
+        and (k := version_key(s.last_affected, ecosystem)) is not None
     ]
+    fixed_ends = [k for s in ss if s.fixed and (k := version_key(s.fixed, ecosystem)) is not None]
     for k, s in sorted(starts, key=lambda t: t[0]):
-        if k > have and any(end <= have for end in ends):
+        if k <= have:
+            continue
+        below = [e for e in open_ends + fixed_ends if e <= have]
+        if below and max(below) in open_ends and max(below) not in fixed_ends:
             return Candidate(
                 ecosystem,
                 name,
@@ -121,4 +129,5 @@ def classify(vuln: dict, ecosystem: str, name: str, version: str) -> Candidate |
                 (k[0] - have[0]) if k and have else None,
                 aliases,
             )
+        break
     return None

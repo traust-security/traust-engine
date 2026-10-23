@@ -11,12 +11,14 @@ import pytest
 from traust_engine.applicability import BELOW_RANGE, GAP, classify
 from traust_engine.applicability.fetch import Fetcher, FetchRefused, extract
 from traust_engine.applicability.fixes import (
+    Commit,
     FileChange,
     narrow,
     only_adds,
     parse_mbox,
     patch_url,
     references,
+    release_like,
 )
 from traust_engine.applicability.matching import anchor, presence
 from traust_engine.applicability.packet import build
@@ -60,14 +62,27 @@ def test_inside_a_span_or_listed_is_not_a_candidate():
     assert classify(rec, "Go", "example.com/lib", "1.4.0") is None
 
 
-def test_between_two_spans_is_a_gap():
+def test_after_an_unfixed_span_and_before_the_next_is_a_gap():
     rec = _rec(
         _semver(
-            {"introduced": "0"}, {"fixed": "1.5.0"}, {"introduced": "2.0.0"}, {"fixed": "2.3.0"}
+            {"introduced": "0"},
+            {"last_affected": "1.5.0"},
+            {"introduced": "2.0.0"},
+            {"fixed": "2.3.0"},
         )
     )
     c = classify(rec, "Go", "example.com/lib", "1.7.0")
     assert c.kind == GAP and c.stated_start == "2.0.0"
+
+
+def test_after_a_fixed_span_is_not_a_gap():
+    # urllib3 shape: the 1.x line is fixed in 1.26.17; 1.26.18 is simply fixed
+    rec = _rec(
+        _semver(
+            {"introduced": "0"}, {"fixed": "1.26.17"}, {"introduced": "2.0.0"}, {"fixed": "2.2.2"}
+        )
+    )
+    assert classify(rec, "Go", "example.com/lib", "1.26.18") is None
 
 
 def test_introduced_zero_and_above_every_fix_are_not_candidates():
@@ -325,3 +340,17 @@ def test_two_records_for_one_cve_make_one_candidate():
     assert unanswered == [] and len(out) == 1
     _c, rec, aliases = out[0]
     assert rec["id"] == "GHSA-aaaa-bbbb-cccc" and [a["id"] for a in aliases] == ["GO-2026-0001"]
+
+
+def test_release_commits_are_recognised():
+    bump = [Commit("1" * 40, "[6.0.x] Bumped version for 6.0.6 release.", "", [])]
+    assert release_like(
+        bump, [FileChange("django/__init__.py", [{"removed": ["a"], "added": ["b"]}])]
+    )
+    assert release_like(
+        [], [FileChange("docs/releases/4.2.txt", [{"removed": [], "added": ["x"]}])]
+    )
+    real = [Commit("2" * 40, "Fixed CVE-2026-0001 -- bounded the parser.", "", [])]
+    assert not release_like(
+        real, [FileChange("django/utils/html.py", [{"removed": ["a"], "added": ["b"]}])]
+    )
