@@ -2,6 +2,25 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.44.1]
+
+- **NuGet lookups no longer miss advisories over casing.** OSV matches
+  NuGet ids case-sensitively, while NuGet treats them as case-insensitive
+  and projects write references in any casing.
+  - **How:** given a `NugetIds` resolver, `OsvClient` retries a NuGet lookup
+    that came back empty under the id nuget.org publishes (its registration
+    index). The client records each rename in `recased`, and the OSV
+    adapter's metadata reports them as `nuget_ids_recased`.
+  - **Range matching** compares NuGet names case-insensitively.
+  - **Scope:** the engine's own default clients (`scan_api`, `scan`,
+    `scan_sbom`) turn the retry on; other callers pass `nuget_ids`.
+  - **Smoke test:**
+    - On a project referencing `newtonsoft.json` 12.0.1 and
+      `system.net.http` 4.3.0 in lowercase, the scan finds both advisories
+      (GHSA-5crp-9r3c-p9vr, GHSA-7jgj-8wvc-jh57); 0.44.0 found neither.
+    - On the fleet's 74 NuGet names, as written, nothing changes (53
+      advisories, no renames). Lowercased, all 53 are recovered.
+
 ## [0.44.0]
 
 - **The below-range lane covers RubyGems and NuGet.**
