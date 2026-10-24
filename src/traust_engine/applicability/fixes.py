@@ -150,12 +150,16 @@ RELEASE_SUBJECT = re.compile(
     r"(?:[a-z]+\(release\)!?:|(?:[a-z]+(?:\([^)]*\))?!?:\s*)?"
     r"(?:bump(?:ed|s)?\s+(?:the\s+)?version\b|bump(?:ed|s)?\s+(?:to\s+|for\s+)?v?\d"
     r"|(?:prepare|preparing|cut|cutting)?\s*(?:for\s+)?(?:the\s+)?release[sd]?(?:\s+(?:of\s+|for\s+)?(?:[a-z][\w.-]*\s+){0,2}v?\d|\s*$)"
-    r"|version\s+bump|v?\d+\.\d+(?:\.\d+)*(?:\s|$)))",
+    # "Version Packages" is the changesets release bot's subject.
+    r"|version\s+bump|version\s+packages(?:\s+\(#\d+\))?\s*$|v?\d+\.\d+(?:\.\d+)*(?:\s|$)))",
     re.IGNORECASE,
 )
 RELEASE_FILES = re.compile(
     r"(^|/)(__init__\.py|_version\.py|version\.py|setup\.(py|cfg)|pyproject\.toml|package\.json|"
-    r"go\.mod|go\.sum|VERSION|CHANGE(LOG|S)[^/]*|HISTORY[^/]*|NEWS[^/]*|[^/]*\.md|[^/]*\.rst)$"
+    r"go\.mod|go\.sum|VERSION|CHANGE(LOG|S)[^/]*|HISTORY[^/]*|NEWS[^/]*|[^/]*\.md|[^/]*\.rst|"
+    # Ruby's lib/<gem>/version.rb and gemspec, NuGet's nuspec. Not Gemfile.lock or
+    # .csproj: a dependency-bump fix changes only those.
+    r"version\.rb|[^/]*\.gemspec|[^/]*\.nuspec)$"
     r"|(^|/)docs?/",
     re.IGNORECASE,
 )

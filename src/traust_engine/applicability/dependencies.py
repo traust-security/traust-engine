@@ -6,8 +6,10 @@ name. When a file the fix touches imports one of the installed version's direct
 dependencies, that dependency's source joins the packet, up to MAX_DEPS.
 
 Direct dependencies come from the module's own go.mod for Go (exact versions)
-and from deps.dev's resolved graph for npm, PyPI, Maven and Cargo. A dependency
-that can't be resolved or fetched is recorded, never silently skipped.
+and from deps.dev's resolved graph for npm, PyPI, Maven and Cargo. deps.dev
+resolves neither RubyGems nor NuGet, so those packets record the gap. A
+dependency that can't be resolved or fetched is recorded, never silently
+skipped.
 """
 
 from __future__ import annotations

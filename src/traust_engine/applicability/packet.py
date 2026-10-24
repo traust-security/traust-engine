@@ -6,7 +6,9 @@ a candidate, and each candidate gets a packet:
 
 - the advisory (summary, details, ranges for the package);
 - the chosen fix patch and how it was chosen;
-- the installed version's source, from its registry;
+- the installed version's source, from its registry (for NuGet, whose
+  packages hold compiled assemblies, the forge archive at the commit the
+  package's nuspec declares);
 - per-hunk presence of the fix's removed and added lines in that source.
 
 A packet carries facts only. Whether the version is affected is decided by
@@ -39,7 +41,7 @@ from traust_engine.applicability.fixes import (
 from traust_engine.applicability.matching import anchor, presence, root_of
 from traust_engine.osv import OsvClient, Query
 
-SUPPORTED = ("Go", "PyPI", "npm", "Maven", "crates.io")
+SUPPORTED = ("Go", "PyPI", "npm", "Maven", "crates.io", "RubyGems", "NuGet")
 FULL_VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+.][0-9A-Za-z.+-]*)?")
 
 
@@ -51,8 +53,11 @@ def exact(ecosystem: str, version: str, basis: str | None) -> bool:
     - a pom.xml version is the version Maven uses, and go.mod lists the
       selected versions: both exact;
     - a package.json pin is exact only as a full x.y.z ("1.2" means 1.2.x);
-    - a Cargo.toml version is a caret requirement ("1" means ^1), and a Python
-      manifest version is a floor: neither is the installed version.
+    - a .csproj PackageReference version is a minimum, but NuGet installs the
+      lowest version that satisfies it, so a full x.y.z is the one installed;
+    - a Cargo.toml version is a caret requirement ("1" means ^1), and Python
+      and Ruby manifest versions are floors or ranges: none of them is the
+      installed version.
     Resolved and defaulted versions are approximations, never exact.
     """
     if basis == "locked":
@@ -61,7 +66,7 @@ def exact(ecosystem: str, version: str, basis: str | None) -> bool:
         return False
     if ecosystem in ("Maven", "Go"):
         return True
-    if ecosystem == "npm":
+    if ecosystem in ("npm", "NuGet"):
         return bool(FULL_VERSION.fullmatch(version))
     return False
 
@@ -80,6 +85,30 @@ def installed(
         else:
             keep.append((eco, name, version))
     return keep, skipped
+
+
+def nuget_ids(
+    pkgs: list[tuple[str, str, str]], fetcher: Fetcher
+) -> tuple[list[tuple[str, str, str]], list[dict]]:
+    """Installs with each NuGet id in its publisher's casing, which OSV needs;
+    gaps for NuGet ids the registry can't confirm. Other ecosystems pass through."""
+    out, gaps = [], []
+    for eco, name, version in pkgs:
+        if eco == "NuGet":
+            try:
+                name = fetcher.nuget_id(name, version)
+            except (FetchRefused, OSError, ValueError) as e:
+                gaps.append(
+                    {
+                        "reason": "nuget_id_unresolved",
+                        "package": name,
+                        "version": version,
+                        "detail": f"{type(e).__name__}: {e}",
+                    }
+                )
+                continue
+        out.append((eco, name, version))
+    return out, gaps
 
 
 def candidates(
@@ -198,8 +227,9 @@ def build(
     fetcher = fetcher or Fetcher()
     out.mkdir(parents=True, exist_ok=True)
     pkgs, skipped = installed(repo, tuple(e for e in ecosystems if e in SUPPORTED))
+    pkgs, unnamed = nuget_ids(pkgs, fetcher)
     cands, unanswered = candidates(pkgs, client)
-    gaps: list[dict] = [{"reason": "osv_unanswered", **u} for u in unanswered]
+    gaps: list[dict] = unnamed + [{"reason": "osv_unanswered", **u} for u in unanswered]
     packets: list[dict] = []
     sources: dict[tuple[str, str, str], dict] = {}
     for n, (c, rec, aliases) in enumerate(cands):
@@ -262,6 +292,8 @@ def build(
                 "sha256": src["sha256"],
                 "files": src["files"],
                 "root": str(root.relative_to(out)),
+                # NuGet: the repository and commit the package's nuspec names
+                **({"declared_by": src["declared_by"]} if "declared_by" in src else {}),
             },
             "hunk_presence": hunks,
             # sources of direct dependencies a file the fix touches imports

@@ -2,6 +2,40 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.44.0]
+
+- **The below-range lane covers RubyGems and NuGet.**
+  - **Installs:** `Gemfile.lock` and NuGet lockfiles. A `.csproj`
+    PackageReference with a full x.y.z also counts, because NuGet installs the
+    lowest version that satisfies it.
+  - **RubyGems source:** the `.gem` from rubygems.org, whose `data.tar.gz`
+    holds the gem's files.
+  - **NuGet source:** NuGet packages hold compiled assemblies, so the source
+    is the GitHub or GitLab archive at the commit the package's nuspec
+    declares. The packet records the nuspec, repository and commit under
+    `installed_source.declared_by`.
+  - **NuGet ids:** each id is put in its publisher's casing, from the nuspec,
+    before the OSV query. OSV's NuGet lookup is case-sensitive, and a
+    lowercase id found nothing. An id the registry can't confirm becomes a
+    `nuget_id_unresolved` gap.
+  - **Release times:** from rubygems.org; NuGet has none.
+  - **Dependencies:** deps.dev resolves neither ecosystem, so packets record
+    a dependency gap.
+  - **New default hosts:** rubygems.org, api.nuget.org, and github.com for
+    source archives, which may redirect to codeload.github.com.
+- **More release commits are recognised.** The detector now knows Ruby's
+  `version.rb` and `.gemspec`, NuGet's `.nuspec`, and the changesets bot's
+  "Version Packages" subject. `Gemfile.lock` and `.csproj` stay out, because
+  a dependency-bump fix changes only those.
+- **Acceptance:**
+  - The four Phase 0 RubyGems and NuGet cases (actionpack, kramdown, rack,
+    Kiota.Builder) each build a packet, and two blind reviews of each rule
+    `not_applicable`, matching the ground truth.
+  - Against a fresh run of 0.43.0 on the same day's data, the other 45
+    packets change in one place only: next (case-47) now gets its reviewed
+    fix instead of a "Version Packages" release commit, which an OSV alias
+    record started linking.
+
 ## [0.43.0]
 
 - **Packets carry the source of the dependencies the fix's code imports.**
