@@ -40,7 +40,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from traust_engine.adapters.osv import _failed_lookup, fixed_version, lookup
-from traust_engine.osv import OsvClient, Query
+from traust_engine.osv import NugetIds, OsvClient, Query
 from traust_engine.osv.ranges import range_evidence
 
 # purl type -> OSV ecosystem
@@ -176,7 +176,7 @@ def scan_sbom(sbom: Path | dict, client: OsvClient | None = None) -> dict:
         else load_syft(sbom)
     )
     packages, stats = collect_sbom_packages(doc)
-    client = client or OsvClient()
+    client = client or OsvClient(nuget_ids=NugetIds())
     keys = sorted(packages)
     failure = client.probe(Query(*keys[0])) if keys else None
     if failure:

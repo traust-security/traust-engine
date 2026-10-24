@@ -46,7 +46,7 @@ from traust_engine.adapters._contract_bridge import (
     utc_now,
 )
 from traust_engine.assets import harness_version as engine_harness_version
-from traust_engine.osv import OsvClient, Query, max_score
+from traust_engine.osv import NugetIds, OsvClient, Query, max_score
 from traust_engine.osv.ranges import fixed_for, range_evidence
 from traust_engine.portfolio import parsers as manifest_parsers
 from traust_engine.portfolio.graph import parse_gomod
@@ -783,6 +783,9 @@ def lookup(
         "lookup_issues": dict(sorted(issues.items())),
         "status": "degraded" if issues else "complete",
     }
+    # NuGet ids OSV only answered under nuget.org's casing (written -> published)
+    if recased := dict(getattr(client, "recased", None) or {}):
+        provenance["nuget_ids_recased"] = dict(sorted(recased.items()))
     if keys and unanswered == len(keys):
         provenance["status"] = "failed"
     return candidates, provenance
@@ -816,7 +819,7 @@ def scan_api(repo: Path, client: OsvClient | None = None, resolver=None) -> dict
         raise ValueError(f"not a directory: {repo}")
     packages, stats = collect_packages(repo)
     resolution = resolve_transitive(packages, stats, resolver) if resolver else None
-    client = client or OsvClient()
+    client = client or OsvClient(nuget_ids=NugetIds())
     keys = sorted(packages)
     failure = client.probe(Query(*keys[0])) if keys else None
     if failure:
@@ -846,7 +849,7 @@ def scan(repo: Path, timeout: int = 600, *, client: OsvClient | None = None) -> 
 
     Raises ``RuntimeError`` when the API could not be used at all.
     """
-    doc = scan_api(repo, client or OsvClient(timeout=timeout))
+    doc = scan_api(repo, client or OsvClient(timeout=timeout, nuget_ids=NugetIds()))
     prov = doc["provenance"]
     if prov["status"] == "failed":
         detail = (prov.get("failure") or {}).get("detail") or "no package was answered"
