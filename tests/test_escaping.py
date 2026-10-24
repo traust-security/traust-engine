@@ -1,4 +1,4 @@
-"""Tests for traust_engine._util.escaping — the shared untrusted-text helpers."""
+"""Tests for traust_engine.escaping — the shared untrusted-text helpers."""
 
 import json
 

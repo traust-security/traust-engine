@@ -14,7 +14,6 @@ from pathlib import Path
 
 from traust_contracts.v1 import risk_rating as rr
 
-from traust_engine.corpus.threat_model import parse_threats
 from traust_engine.reporting import lint, render, threat_rating, validate
 
 LIKELIHOOD = {
@@ -231,27 +230,6 @@ class TestLint(unittest.TestCase):
         markdown = render.render_threat_model(document(low, rated_threat("T1")))
         _, warnings = lint_markdown(markdown)
         self.assertTrue(any("not sorted by (severity desc" in w for w in warnings), warnings)
-
-
-class TestCorpusParse(unittest.TestCase):
-    def test_rated_and_unrated_rows_carry_severity_and_source(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            path = root / "product" / "repo" / "repo-threat-model.md"
-            path.parent.mkdir(parents=True)
-            path.write_text(
-                render.render_threat_model(document(rated_threat(), LEGACY_THREAT)),
-                encoding="utf-8",
-            )
-            parsed = parse_threats(path, root)
-        t1, t2 = parsed["threats"]
-        self.assertEqual(
-            (t1["severity"], t1["severity_source"], t1["impact_score"], t1["impact_basis"]),
-            ("high", "owasp", 7.25, "technical"),
-        )
-        self.assertEqual((t2["severity"], t2["severity_source"]), ("medium", "legacy-crosswalk"))
-        self.assertEqual((t2["impact"], t2["likelihood"]), ("medium", "possible"))
-        self.assertNotIn("score", t1)
 
 
 class TestOrdering(unittest.TestCase):

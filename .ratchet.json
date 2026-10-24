@@ -45,10 +45,6 @@
   "src/traust_engine/compliance/scope.py": {
     "contracts": 1
   },
-  "src/traust_engine/corpus/report_store.py": {
-    "contracts": 1,
-    "database": 1
-  },
   "src/traust_engine/corpus/resolver.py": {
     "contracts": 2,
     "state-file": 2

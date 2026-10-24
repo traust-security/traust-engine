@@ -7,9 +7,7 @@ linter, and come back out of the parser.
 """
 
 import copy
-import json
 
-from traust_engine.corpus.threat_model import parse_threats
 from traust_engine.reporting import lint, render
 
 DOC = {
@@ -117,15 +115,6 @@ def test_the_linter_rejects_an_unknown_surface(tmp_path):
     path.write_text(path.read_text().replace("| credential-acceptance |", "| made-up-surface |"))
     errors, _ = lint.lint_file(path)
     assert any("made-up-surface" in e for e in errors), errors
-
-
-def test_the_corpus_parser_reads_the_tags_back(tmp_path):
-    path = _md(tmp_path, DOC)
-    parsed = parse_threats(path, tmp_path)
-    by_id = {t["id"]: t for t in parsed["threats"]}
-    assert by_id["T1"]["review_surfaces"] == ["credential-acceptance"]
-    assert "review_surfaces" not in by_id["T2"]
-    assert json.loads(json.dumps(parsed))  # still plain JSON
 
 
 def _with_deprioritized(rows):
