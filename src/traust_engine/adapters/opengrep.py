@@ -771,7 +771,6 @@ def _facts_to_findings(facts: list[dict]) -> list[dict[str, Any]]:
                 "description": _describe(fact),
                 "evidence": evidence,
                 "category": fact["rule_id"],
-                "origin": "opengrep",
             }
         )
     return findings

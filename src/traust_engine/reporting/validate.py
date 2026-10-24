@@ -1911,11 +1911,9 @@ def validate_report(
             # thing a schema cannot say: an OWASP rating's scores, levels
             # and severity must follow from its factors.
             cross_validate_threat_model(report, result)
-        elif "refuted-register" in sid or "operator-priv-profile" in sid:
-            # A refuted register (refutation worklist) and an operator
-            # privilege profile are not finding reports: the code-audit
-            # cross-checks (severity_criteria, findings_summary) do not fit
-            # them, so only the schema applies.
+        elif any(k in sid for k in ("refuted-register", "operator-priv-profile", "adapter-result")):
+            # Worklists, profiles and scanner observations are not authored
+            # audit reports; their schema applies without audit cross-checks.
             pass
         else:
             cross_validate(report, result)
@@ -1938,6 +1936,7 @@ def validate_report(
         "threat-model",
         "refuted-register",
         "operator-priv-profile",
+        "adapter-result",
     )
     # These checks read findings and metadata directly. On a document that
     # is not report-shaped they would raise and abort a whole directory

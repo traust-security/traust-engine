@@ -82,10 +82,7 @@ def _parse_matches(doc: dict[str, Any]) -> list[dict[str, Any]]:
         if not description and related:
             description = related[0].get("description", "")
 
-        fixed_in = (
-            ", ".join(fix.get("version", "?") for fix in vuln.get("fix", {}).get("versions", []))
-            or None
-        )
+        fixed_in = ", ".join(vuln.get("fix", {}).get("versions", [])) or None
 
         pkg_name = artifact.get("name", "")
         pkg_version = artifact.get("version", "")
@@ -96,13 +93,11 @@ def _parse_matches(doc: dict[str, Any]) -> list[dict[str, Any]]:
         for loc in locations:
             loc_dicts.append(
                 {
-                    "file": loc.get("path", ""),
-                    "start_line": 0,
-                    "end_line": 0,
+                    "path": loc.get("path", ""),
                 }
             )
         if not loc_dicts:
-            loc_dicts.append({"file": f"{pkg_type}:{pkg_name}", "start_line": 0, "end_line": 0})
+            loc_dicts.append({"path": f"{pkg_type}:{pkg_name}"})
 
         cwes = []
         for url in vuln.get("urls", []):
@@ -125,8 +120,6 @@ def _parse_matches(doc: dict[str, Any]) -> list[dict[str, Any]]:
                 "description": description[:2000],
                 "remediation": remediation,
                 "category": "dependency_vulnerability",
-                "origin": "grype",
-                "fingerprint": f"grype:{vuln_id}:{pkg_name}:{pkg_version}",
             }
         )
     return findings

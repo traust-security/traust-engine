@@ -6,31 +6,15 @@ import datetime
 from typing import Any
 
 from traust_contracts.enums import Severity
-from traust_contracts.models import (
-    AdapterMetadata,
-    AdapterResult,
-    AdapterSummary,
-    EvidenceBlock,
-    Finding,
-    Location,
-)
+from traust_contracts.models import AdapterMetadata, AdapterResult, AdapterSummary, Finding
 
 
 def utc_now() -> str:
     return datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-_SEVERITY_MAP = {
-    "critical": Severity.CRITICAL,
-    "high": Severity.HIGH,
-    "medium": Severity.MEDIUM,
-    "low": Severity.LOW,
-    "informational": Severity.INFORMATIONAL,
-}
-
-
-def map_severity(hint: str, default: str = "low") -> Severity:
-    return _SEVERITY_MAP.get((hint or default).lower(), Severity.LOW)
+def map_severity(hint: str) -> Severity:
+    return Severity(hint.lower())
 
 
 def format_lines(start: int | None, end: int | None) -> str:
@@ -52,44 +36,26 @@ def build_adapter_result(
 ) -> AdapterResult:
     """Build AdapterResult from raw finding dicts produced by adapter parsers."""
     scanned_at = scanned_at or utc_now()
+    findings: list[Finding] = []
     by_severity: dict[str, int] = {}
     for item in findings_data:
-        sev = item.get("severity", "low")
-        key = sev.value if hasattr(sev, "value") else str(sev)
+        unknown = item.keys() - Finding.model_fields.keys()
+        if unknown:
+            raise ValueError(f"undeclared adapter finding fields: {', '.join(sorted(unknown))}")
+        data = {
+            "severity": Severity.LOW,
+            "cwes": [],
+            "locations": [],
+            "description": "",
+            "remediation": "",
+            **item,
+        }
+        if isinstance(data["severity"], str):
+            data["severity"] = map_severity(data["severity"])
+        finding = Finding.model_validate(data)
+        findings.append(finding)
+        key = finding.severity.value
         by_severity[key] = by_severity.get(key, 0) + 1
-
-    findings: list[Finding] = []
-    for item in findings_data:
-        locations = [
-            loc if isinstance(loc, Location) else Location(**loc)
-            for loc in item.get("locations", [])
-        ]
-        evidence = [
-            ev if isinstance(ev, EvidenceBlock) else EvidenceBlock(**ev)
-            for ev in item.get("evidence", [])
-        ]
-        sev = item.get("severity", Severity.LOW)
-        if isinstance(sev, str):
-            sev = map_severity(sev)
-        findings.append(
-            Finding(
-                id=item["id"],
-                title=item["title"],
-                severity=sev,
-                cwes=item.get(
-                    "cwes",
-                    [],
-                ),
-                locations=locations,
-                description=item.get("description", ""),
-                remediation=item.get("remediation", ""),
-                evidence=evidence,
-                category=item.get("category", ""),
-                origin=item.get("origin", tool),
-                fingerprint=item.get("fingerprint", ""),
-                source_findings=item.get("source_findings", []),
-            )
-        )
 
     return AdapterResult(
         target=target,

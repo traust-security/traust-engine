@@ -2,7 +2,7 @@
 
 All notable changes to traust-engine are documented here.
 
-## [0.42.1]
+## [0.42.2]
 
 - **Fix: release and version-bump commits are recognized in conventional-commit
   form**, so the real fix wins the fix choice. The Phase 3 acceptance run
@@ -24,6 +24,17 @@ All notable changes to traust-engine are documented here.
   A change touching only markdown or reStructuredText files is release-like
   too. On the same 45 packets, no release commit is chosen now, and those 8
   get the real fix commit.
+
+## [0.42.1]
+
+- Repair typed adapter observations for the adapter-result contract: preserve
+  supplied Finding metadata, reject unknown severities, and keep scanner names
+  in `metadata.tool` rather than workflow `origin`. Native scanner fingerprints
+  remain in raw candidates, not the domain finding fingerprint.
+- Use native Grype paths and fixed-version strings. Validate adapter-result
+  artifacts against their schema without authored-audit cross-checks.
+- Add a real Gitleaks regression over the bundled synthetic canary, including
+  encrypted Vault payloads, through typed serialization and contract validation.
 
 ## [0.42.0]
 

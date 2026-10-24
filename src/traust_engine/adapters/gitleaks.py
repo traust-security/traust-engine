@@ -259,8 +259,6 @@ def _candidates_to_findings(candidates: list[dict]) -> list[dict[str, Any]]:
                 "severity": map_severity("high"),
                 "locations": [loc],
                 "description": _describe(cand),
-                "origin": "gitleaks",
-                "fingerprint": cand.get("fingerprint", ""),
                 "category": cand.get("rule_id", ""),
             }
         )
