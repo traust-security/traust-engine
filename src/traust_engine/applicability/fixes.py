@@ -140,14 +140,23 @@ def narrow(commits: list[Commit], ids: set[str]) -> list[Commit]:
     return named or commits
 
 
+# A release or version-bump subject, after an optional "[branch] " tag and an
+# optional conventional-commit type ("chore:", "build!:"). "Release" and "bump"
+# count only when a version (or the word "version") follows, at most two words
+# later ("Release Wasmtime 46.0.3"), so "Release the lock" and "bump lodash
+# from 4.17.20 to 4.17.21" are not releases. A `(release)` scope always is.
 RELEASE_SUBJECT = re.compile(
-    r"^(?:\[[^\]]*\]\s*)?(?:bump(?:ed)? (?:the )?version|release|prepare (?:for )?release|"
-    r"version bump|v?\d+\.\d+(?:\.\d+)*(?:\s|$))",
+    r"^(?:\[[^\]]*\]\s*)?"
+    r"(?:[a-z]+\(release\)!?:|(?:[a-z]+(?:\([^)]*\))?!?:\s*)?"
+    r"(?:bump(?:ed|s)?\s+(?:the\s+)?version\b|bump(?:ed|s)?\s+(?:to\s+|for\s+)?v?\d"
+    r"|(?:prepare|preparing|cut|cutting)?\s*(?:for\s+)?(?:the\s+)?release[sd]?(?:\s+(?:of\s+|for\s+)?(?:[a-z][\w.-]*\s+){0,2}v?\d|\s*$)"
+    r"|version\s+bump|v?\d+\.\d+(?:\.\d+)*(?:\s|$)))",
     re.IGNORECASE,
 )
 RELEASE_FILES = re.compile(
     r"(^|/)(__init__\.py|_version\.py|version\.py|setup\.(py|cfg)|pyproject\.toml|package\.json|"
-    r"go\.mod|go\.sum|VERSION|CHANGE(LOG|S)[^/]*|HISTORY[^/]*|NEWS[^/]*)$|(^|/)docs?/",
+    r"go\.mod|go\.sum|VERSION|CHANGE(LOG|S)[^/]*|HISTORY[^/]*|NEWS[^/]*|[^/]*\.md|[^/]*\.rst)$"
+    r"|(^|/)docs?/",
     re.IGNORECASE,
 )
 

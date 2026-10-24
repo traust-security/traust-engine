@@ -406,3 +406,41 @@ def test_redirects_are_configurable():
         Fetcher(transport=lambda u: (b"x", "https://mirror.example/blob")).get(
             "https://pypi.org/x", f.registries
         )
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "chore: bump version to 2.131.0 [skip ci]",
+        "bump for 41.0.2 (#9215)",
+        "chore(release): prepare release 1.18.0 (#11003)",
+        "chore(release): v1.13.2 (#7207)",
+        "Bumped v8.9.0 (#5589)",
+        "chore(master): release 10.0.5 (#1864)",
+        "[6.0.x] Bumped version for 6.0.6 release.",
+        "Release Wasmtime 46.0.3 (#14170)",
+    ],
+)
+def test_release_subjects_seen_in_real_fix_links(subject):
+    assert release_like([Commit("1" * 40, subject, "", [])], [])
+
+
+@pytest.mark.parametrize(
+    "subject",
+    [
+        "Fixed CVE-2025-14550 -- Optimized repeated header parsing in ASGI requests.",
+        "fix: normalize recursive JWT payload errors",
+        "chore(deps): bump lodash from 4.17.20 to 4.17.21",
+        "Bump golang.org/x/net dependency to v0.23.0",
+        "[PR #8652/b0536ae6 backport][3.10] Do not follow symlinks for compressed file variants",
+        "Merge commit from fork",
+        "Release the lock before returning",
+    ],
+)
+def test_fix_subjects_are_not_release_commits(subject):
+    files = [FileChange("lib/x.py", [{"removed": ["a"], "added": ["b"]}])]
+    assert not release_like([Commit("2" * 40, subject, "", [])], files)
+
+
+def test_a_markdown_only_change_is_not_a_fix():
+    assert release_like([], [FileChange("README.md", [{"removed": ["a"], "added": ["b"]}])])
