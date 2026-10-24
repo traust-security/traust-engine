@@ -8,7 +8,6 @@ from traust_contracts import ModelRegistry
 
 from traust_engine import locations
 from traust_engine._ops_base import ContextOps
-from traust_engine.registry import feeds as feed_ops
 from traust_engine.registry.models import (
     cost_usd,
     long_prompt_thresholds,
@@ -81,13 +80,3 @@ class ModelsOps(ContextOps):
 
     def feeds_cache(self) -> Path:
         return self._feeds_cache()
-
-    def feed_status(self, max_age_hours: float | None = None) -> dict:
-        return feed_ops.feed_status(self._feeds_cache(), max_age_hours=max_age_hours)
-
-    def load_product_definitions(self) -> dict:
-        return feed_ops.load_product_definitions(self._feeds_cache())
-
-    def packages_dir(self) -> Path | None:
-        pt = locations.progress_tracker_dir(self._loc)
-        return (pt / "processed-results") if pt else None

@@ -5,9 +5,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-import pytest
 import yaml
-from traust_contracts import DeploymentConfigMissing
 
 from traust_engine import HarnessEngine
 from traust_engine.assets import compliance_data_dir
@@ -53,25 +51,6 @@ def test_metrics_spend_build_uses_configured_paths(tmp_path):
     out = h.metrics.build_spend_dashboard()
     assert out == pt / "metrics" / "dashboards" / "spend" / "spend-dashboard.md"
     assert out.is_file()
-
-
-def test_metrics_sla_paths_from_context(tmp_path):
-    pt = tmp_path / "estate-pt"
-    (pt / "configs").mkdir(parents=True)
-    (pt / "configs" / "sla-policy.yaml").write_text("ignored: true\n", encoding="utf-8")
-    home = _home_with_progress_tracker(tmp_path, pt)
-    h = HarnessEngine.load(config_home=home)
-    # The policy is deployment config: the config home, never progress-tracker.
-    assert h.metrics.default_sla_policy() == home / "sla-policy.yaml"
-    assert h.metrics.sla_dashboard_dir() == pt / "metrics" / "dashboards" / "sla"
-
-
-def test_a_missing_sla_policy_names_the_template(tmp_path):
-    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
-    (home / "sla-policy.yaml").unlink()
-    h = HarnessEngine.load(config_home=home)
-    with pytest.raises(DeploymentConfigMissing, match=r"config/sla-policy\.example\.yaml"):
-        h.metrics.default_sla_policy()
 
 
 def test_compliance_reference_data_ships_with_the_engine():
@@ -184,16 +163,10 @@ def test_compliance_ops_use_configured_paths(tmp_path):
     assert doc["metadata"]["artifact"] == "compliance-dashboard"
     assert doc["metadata"]["assessments_found"] == 0
 
-    loaded = h.compliance.load_scope()
-    res = h.compliance.resolve(loaded, "b1")
-    assert res["repos"] == ["org/only"]
-
 
 def test_adapters_ops_expose_context_config(tmp_path):
     home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
     h = HarnessEngine.load(config_home=home)
-    assert h.adapters.rule_pack_allowlist() is h.ctx.rule_pack_allowlist
-    assert h.adapters.safe_exec_profiles() is h.ctx.safe_exec
     allowlist = h.adapters.allowlist_for_opengrep()
     assert allowlist is not None
     assert "argus-observe-rules" in (allowlist.packs or {})
@@ -244,7 +217,6 @@ def test_toolchain_ops_external_tools_from_context(tmp_path):
     home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
     h = HarnessEngine.load(config_home=home)
     assert h.toolchain.external_tools() is h.ctx.external_tools
-    assert h.toolchain.safe_exec() is h.ctx.safe_exec
     pins = h.toolchain.pins()
     assert pins["grype"]["expected"] == "0.115.0"
     assert pins["grype"]["version_cmd"] == ["grype", "--version"]
@@ -282,31 +254,6 @@ def test_two_engines_keep_independent_safe_exec_profile_maps(tmp_path):
     assert "curl" in a_allow
     assert b_allow == frozenset({"echo"})
     assert a_allow != b_allow
-
-
-def test_adapters_scan_govulncheck_uses_context_profiles(tmp_path, monkeypatch):
-    from traust_engine.adapters import govulncheck as gv
-
-    repo = tmp_path / "mod"
-    repo.mkdir()
-    (repo / "go.mod").write_text("module example.com/x\n\ngo 1.21\n", encoding="utf-8")
-    home = _home_with_progress_tracker(tmp_path, tmp_path / "pt")
-    profiles_yaml = yaml.safe_load((home / "safe-exec-profiles.yaml").read_text())
-    profiles_yaml["profiles"]["go-scan"]["allow"] = ["govulncheck"]
-    (home / "safe-exec-profiles.yaml").write_text(yaml.safe_dump(profiles_yaml), encoding="utf-8")
-
-    captured = {}
-
-    def fake_run(repo, timeout, govulncheck_bin, *, profile_map=None, freeze=True):
-        captured["profile_map"] = profile_map
-        return 0, "", "", {"version": "v1.0.0"}, []
-
-    monkeypatch.setattr(gv, "_run_govulncheck", fake_run)
-    h = HarnessEngine.load(config_home=home)
-    h.adapters.scan_govulncheck(repo, timeout=1)
-
-    assert captured["profile_map"] is h.adapters.safe_exec_profile_map()
-    assert "govulncheck" in captured["profile_map"]["go-scan"].allow
 
 
 def test_safe_exec_bind_profiles_match_config_yaml_not_fallback(tmp_path):

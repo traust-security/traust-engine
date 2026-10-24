@@ -425,27 +425,3 @@ class TestProgrammaticScan:
 
     def test_load_supplemental_packs_none_means_off(self):
         assert R.load_supplemental_packs(allowlist=None) == []
-
-    def test_adapters_ops_scan_injects_context_allowlist(self, target_dir, monkeypatch):
-        from traust_engine import HarnessEngine
-
-        h = HarnessEngine.load()
-        expected = h.adapters.allowlist_for_opengrep()
-        captured: dict = {}
-
-        def fake_scan(*_args, **kwargs):
-            captured["allowlist"] = kwargs.get("allowlist")
-            captured["loc"] = kwargs.get("loc")
-            return R.build_scan_result(
-                str(target_dir),
-                "opengrep",
-                [],
-                scanned_at=R.utc_now(),
-                scanner_version="test",
-            )
-
-        monkeypatch.setattr("traust_engine.adapters.opengrep.scan", fake_scan)
-
-        h.adapters.scan(target_dir)
-        assert captured["allowlist"] is expected
-        assert captured["loc"] is h.ctx.locations

@@ -9,8 +9,7 @@ window.
 CANDIDATE GENERATOR, NOT AN AUTHORITY. This contributes ownership context
 and candidate seeds only. It never names an owner, and it never writes
 ownership that belongs in operator-maintained inputs. Consumers: skills/
-assign-findings-owners, skills/reassign-findings-owners,
-traust metrics sla (sla-view).
+assign-findings-owners, skills/reassign-findings-owners.
 
 Contact ladder, highest confidence first — each contact is tagged with its
 originating field so a designated embargo contact is never mistaken for a

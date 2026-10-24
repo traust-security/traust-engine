@@ -1,4 +1,4 @@
-"""``HarnessEngine.compliance`` — posture dashboard + boundary scope, bound to context.
+"""``HarnessEngine.compliance`` — posture dashboard, bound to context.
 
 Paths come from the injected ``HarnessContext``; callers use ``h.compliance.build()``
 where they used to pass ``compliance_dir()``, ``findings_db()``, etc.
@@ -11,7 +11,7 @@ from pathlib import Path
 from traust_contracts import DeploymentConfigMissing
 
 from traust_engine._ops_base import ContextOps
-from traust_engine.compliance import dashboard, scope
+from traust_engine.compliance import dashboard
 from traust_engine.locations import COMPLIANCE_REL, FINDINGS_DB_REL, REPO_GRAPH_REL
 
 SCOPE_REGISTRY = "compliance-scope.yaml"
@@ -41,9 +41,6 @@ class ComplianceOps(ContextOps):
     def dashboard_out_dir(self) -> Path:
         return self._progress_tracker() / DASHBOARD_OUT_REL
 
-    def collect_assessments(self, assessments_dir: Path | None = None) -> list[dict]:
-        return dashboard.collect_assessments(assessments_dir or self._compliance_dir())
-
     def build(
         self,
         *,
@@ -65,16 +62,3 @@ class ComplianceOps(ContextOps):
 
     def render_md(self, doc: dict, history: list[dict]) -> str:
         return dashboard.render_md(doc, history)
-
-    def load_scope(self, path: Path | None = None) -> dict:
-        return scope.load_scope(path or self.scope_registry())
-
-    def resolve(self, scope_doc: dict, boundary_id: str, graph_path: Path | None = None) -> dict:
-        gp = graph_path if graph_path is not None else self._repo_graph()
-        return scope.resolve(scope_doc, boundary_id, gp)
-
-    def graph_product_repos(self, product: str, graph_path: Path | None = None) -> list[str]:
-        gp = graph_path if graph_path is not None else self._repo_graph()
-        if gp is None:
-            raise scope.ScopeError("repo-graph path unavailable — configure analysis_results")
-        return scope.graph_product_repos(gp, product)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from traust_contracts import DeploymentConfigMissing, HarnessContext, Locations
+from traust_contracts import HarnessContext, Locations
 
 from traust_engine import locations
 
@@ -26,21 +26,6 @@ class ContextOps:
 
             self._safe_exec_profile_map = safe_exec.profiles_from_section(self._ctx.safe_exec)
         return self._safe_exec_profile_map
-
-    def _config_file(self, filename: str) -> Path:
-        """A file in the config home, which must exist.
-
-        Raises ``DeploymentConfigMissing`` naming the template to copy: the
-        harness never runs on a template or falls back to another tree.
-        """
-        path = self._ctx.config_home / filename
-        if not path.is_file():
-            stem, _, ext = filename.rpartition(".")
-            raise DeploymentConfigMissing(
-                f"{filename} not found in the config home ({self._ctx.config_home}); "
-                f"copy traust's config/{stem}.example.{ext} there and fill it in"
-            )
-        return path
 
     def _optional_config_path(self, filename: str, loaded: object | None) -> Path | None:
         """Path under config_home when an optional section was loaded at entry."""

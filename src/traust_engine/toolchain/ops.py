@@ -5,24 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from traust_contracts import ExternalTools, SafeExecProfiles
+from traust_contracts import ExternalTools
 
 from traust_engine._ops_base import ContextOps
 from traust_engine.toolchain import (
     POPULATABLE_TOOLS,
-    db_status,
-    freeze_env,
-    freeze_flags,
     populate,
-    preflight,
     preflight_failures,
     stamp_string,
-    tool_version,
 )
 from traust_engine.toolchain import (
     check_tool as _check_tool,
 )
-from traust_engine.toolchain._types import DBInfo, ToolCheck
+from traust_engine.toolchain._types import ToolCheck
 
 _PIN_KEYS = ("expected", "version_cmd", "version_regex")
 
@@ -37,9 +32,6 @@ class ToolchainOps(ContextOps):
     def external_tools(self) -> ExternalTools:
         return self._ctx.external_tools
 
-    def safe_exec(self) -> SafeExecProfiles:
-        return self._ctx.safe_exec
-
     def pins(self) -> dict[str, dict]:
         """Pin specs from ``external-tools.yaml`` keyed by tool name."""
         out: dict[str, dict] = {}
@@ -50,9 +42,6 @@ class ToolchainOps(ContextOps):
                 continue
             out[name] = {k: spec[k] for k in _PIN_KEYS if k in spec}
         return out
-
-    def preflight(self, required_tools: list[str]) -> list[ToolCheck]:
-        return preflight(required_tools, pins=self.pins())
 
     def check_tool(self, name: str) -> ToolCheck:
         spec = self.pins().get(name, {})
@@ -69,15 +58,6 @@ class ToolchainOps(ContextOps):
     def preflight_failures(self, results: list[ToolCheck]) -> list[str]:
         return preflight_failures(results)
 
-    def freeze_env(self, tool_name: str, *, db_dir: str | None = None) -> dict[str, str]:
-        return freeze_env(tool_name, db_dir=db_dir)
-
-    def freeze_flags(self, tool_name: str) -> list[str]:
-        return freeze_flags(tool_name)
-
-    def db_status(self, tool_name: str) -> DBInfo | None:
-        return db_status(tool_name)
-
     def stamp_string(
         self,
         tool: str,
@@ -87,14 +67,6 @@ class ToolchainOps(ContextOps):
         db_schema: str | None = None,
     ) -> str:
         return stamp_string(tool, version, db_built=db_built, db_schema=db_schema)
-
-    def tool_version(
-        self,
-        binary: str,
-        version_cmd: list[str] | None = None,
-        version_regex: str | None = None,
-    ) -> str | None:
-        return tool_version(binary, version_cmd=version_cmd, version_regex=version_regex)
 
     @property
     def populatable_tools(self) -> frozenset[str]:

@@ -1,7 +1,6 @@
-"""``HarnessEngine.reporting`` — validate, render, lint, SARIF, bound to context.
+"""``HarnessEngine.reporting`` — validate, render, lint, bound to context.
 
-safe_exec comes from the injected ``HarnessContext``; callers use
-``h.reporting.validate(...)`` instead of self-fetching config.
+Callers use ``h.reporting.validate(...)`` instead of self-fetching config.
 """
 
 from __future__ import annotations
@@ -10,13 +9,10 @@ import json
 from pathlib import Path
 
 from traust_engine._ops_base import ContextOps
-from traust_engine.reporting import lint, render, sarif, validate
+from traust_engine.reporting import lint, render, validate
 
 
 class ReportingOps(ContextOps):
-    def safe_exec(self):
-        return self._ctx.safe_exec
-
     def validate(
         self,
         path: str | Path,
@@ -72,7 +68,3 @@ class ReportingOps(ContextOps):
 
     def lint(self, path: str | Path, *, strict: bool = False) -> tuple[list[str], list[str]]:
         return lint.lint_file(Path(path), strict=strict)
-
-    def sarif_convert(self, path: str | Path) -> dict:
-        report = json.loads(Path(path).read_text(encoding="utf-8"))
-        return sarif.export(report)
