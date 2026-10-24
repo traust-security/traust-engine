@@ -2,6 +2,17 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.42.1]
+
+- Repair typed adapter observations for the adapter-result contract: preserve
+  supplied Finding metadata, reject unknown severities, and keep scanner names
+  in `metadata.tool` rather than workflow `origin`. Native scanner fingerprints
+  remain in raw candidates, not the domain finding fingerprint.
+- Use native Grype paths and fixed-version strings. Validate adapter-result
+  artifacts against their schema without authored-audit cross-checks.
+- Add a real Gitleaks regression over the bundled synthetic canary, including
+  encrypted Vault payloads, through typed serialization and contract validation.
+
 ## [0.42.0]
 
 - **`traust_engine.applicability` covers npm, Maven and Cargo** as well as Go

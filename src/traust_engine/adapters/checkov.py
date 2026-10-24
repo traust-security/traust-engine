@@ -781,7 +781,6 @@ def _results_to_findings(results: list[dict]) -> list[dict[str, Any]]:
                 "locations": [loc],
                 "description": r.get("detail", ""),
                 "category": r.get("check", ""),
-                "origin": "checkov",
             }
         )
     return findings

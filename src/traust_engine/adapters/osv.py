@@ -190,7 +190,6 @@ def _candidates_to_findings(candidates: list[dict]) -> list[dict[str, Any]]:
                 "severity": map_severity(_cvss_to_severity(cand.get("max_severity"))),
                 "locations": locs,
                 "description": "; ".join(desc_parts),
-                "origin": "osv",
                 "source_findings": cand.get("aliases", []),
                 "category": cand.get("ecosystem", ""),
             }
