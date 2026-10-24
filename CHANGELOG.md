@@ -2,6 +2,23 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.43.1]
+
+- **The fix choice reads the advisory's wording.** When the real fix's files
+  are absent from the older installed tree, an unrelated commit linked from
+  the advisory could win just by touching files that are present.
+  - **Rule:** among patches that don't name the advisory, the number of words
+    of the advisory's summary that a patch's commit messages and changed paths
+    share (`advisory_words_shared`, package name and common words excluded)
+    now ranks ahead of file presence. Patches that name the advisory are
+    unchanged: file presence still decides among them.
+  - **Result:** on the 45 Phase 3 acceptance packets, two choices change and
+    both are now the real fix: smallrye (CVE-2025-2240, "fix memory leak in
+    metrics" over the metrics refactor) and mlflow (CVE-2026-64849, the
+    DNS-rebinding SSRF fix over an unrelated UI commit). The other 43 choices
+    and all hunk evidence are identical. Two fresh blind reviews of each
+    changed packet rule `not_applicable`, matching the ground truth.
+
 ## [0.43.0]
 
 - **Packets carry the source of the dependencies the fix's code imports.**

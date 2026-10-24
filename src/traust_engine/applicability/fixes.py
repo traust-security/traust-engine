@@ -7,10 +7,12 @@ chosen, not assumed:
 
 - references are ranked: a GIT range's `fixed` commit, then `FIX` references,
   then other commit or pull-request links;
-- each patch is scored on whether it touches source files present in the
-  installed tree, whether its commit message names the advisory, and whether it
-  only adds code (the shape of a feature introduction), and whether it is a
-  release or version-bump commit (a fix's release, not the fix);
+- each patch is scored, in this order, on whether it is a release or
+  version-bump commit (a fix's release, not the fix), whether its commit
+  message names the advisory, how many words of the advisory's summary its
+  message and changed paths share (only when it doesn't name the advisory),
+  whether it touches source files present in the installed tree, and whether
+  it only adds code (the shape of a feature introduction);
 - a bundle is narrowed to the commits that name the advisory, when any do.
 
 The choice and every alternative's score are recorded, so a reviewer can see why.
@@ -128,6 +130,43 @@ def _files(diff: str) -> list[FileChange]:
             elif line.startswith("+") and not line.startswith("+++"):
                 hunk["added"].append(line[1:])
     return [f for f in files if f.hunks and not TEST_PATH.search(f.path)]
+
+
+# Words too common in advisories and commit messages to tell one fix from another.
+STOPWORDS = frozenset(
+    """
+    about after against allow allowed allows also and any are attacker attackers because been
+    before being both but bypass can cause causes caused could does due each even fix fixed
+    fixes for from function has have how impact into issue its may more not now only other out
+    over patch patched possible prior release released remote request should since some such
+    than that the their them then there these this those through too under upgrade use used user
+    users using version versions via vulnerability vulnerable was were what when where which
+    while who will with within without would you your
+    """.split()  # noqa: SIM905
+)
+
+
+def words(text: str) -> set[str]:
+    """Distinct lower-case words of three or more letters, minus STOPWORDS.
+    Underscores and punctuation split words, so `_validate_webhook_url` gives
+    validate, webhook, url. Links are dropped: their hosts and paths would
+    match every commit's headers."""
+    text = re.sub(r"\S+://\S+|\S+@\S+", " ", text.lower())
+    return set(re.findall(r"[a-z][a-z0-9]{2,}", text)) - STOPWORDS
+
+
+def relevance(
+    advisory_text: str, commits: list[Commit], files: list[FileChange], package: str
+) -> int:
+    """How many of the advisory's words the commits' messages and changed paths share.
+
+    A real fix usually echoes its advisory ("SSRF ... webhook delivery"); an
+    unrelated commit linked from it doesn't. The package's own name is left
+    out, since every commit in its repository shares it.
+    """
+    advisory = words(advisory_text) - words(package)
+    commit = words(" ".join(c.message for c in commits) + " " + " ".join(f.path for f in files))
+    return len(advisory & commit)
 
 
 def advisory_ids(vuln: dict) -> set[str]:

@@ -19,9 +19,11 @@ from traust_engine.applicability.fixes import (
     patch_url,
     references,
     release_like,
+    relevance,
+    words,
 )
 from traust_engine.applicability.matching import anchor, presence
-from traust_engine.applicability.packet import build
+from traust_engine.applicability.packet import build, choose_fix
 from traust_engine.osv import BatchOutcome
 
 
@@ -579,3 +581,121 @@ def test_no_resolver_is_a_recorded_gap(tmp_path):
         "PyPI", "p", "1.0", tmp_path, [tmp_path / "a.py"], None, Fetcher(), tmp_path / "d"
     )
     assert sources == [] and gaps == [{"reason": "no dependency resolver configured"}]
+
+
+# ------------------------------------------------------- advisory relevance
+
+
+def _patch(sha, subject, path, body=""):
+    return (
+        f"From {sha} Mon Sep 17 00:00:00 2001\nFrom: Dev <dev@example.com>\n"
+        f"Subject: [PATCH] {subject}\n\n{body}---\n"
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+
+def test_words_split_identifiers_and_drop_links_and_stopwords():
+    assert words("SSRF in `_validate_webhook_url` via https://github.com/ex/lib") == {
+        "ssrf",
+        "validate",
+        "webhook",
+        "url",
+    }
+
+
+def test_relevance_counts_shared_words_but_not_the_package_name():
+    (commit,) = parse_mbox(
+        _patch(
+            "1" * 40,
+            "mlflow: fix DNS-rebinding SSRF in webhook delivery",
+            "mlflow/webhooks/delivery.py",
+        )
+    )
+    advisory = "mlflow SSRF in webhook delivery via DNS rebinding"
+    assert relevance(advisory, [commit], commit.files, "mlflow") == 5
+
+
+def _choose(tmp_path, advisory, patches, present=(), details=""):
+    root = tmp_path / "src"
+    root.mkdir()
+    for path in present:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).write_text("old\n")
+    rec = _rec(
+        refs=[
+            {"type": "WEB", "url": "https://github.com/ex/lib/commit/" + sha} for sha, _ in patches
+        ]
+    )
+    rec["summary"] = advisory
+    rec["details"] = details
+    bodies = {
+        "https://github.com/ex/lib/commit/" + sha + ".patch": text.encode() for sha, text in patches
+    }
+    fetcher = Fetcher(transport=lambda u: (bodies[u], u))
+    return choose_fix(rec, root, fetcher)
+
+
+def test_advisory_wording_decides_when_no_fix_touches_installed_files(tmp_path):
+    other = "5" * 40, _patch("5" * 40, "Fix traces shared-view banner", "ui/banner.ts")
+    fix = (
+        "6" * 40,
+        _patch("6" * 40, "Fix DNS-rebinding SSRF bypass in webhook delivery", "lib/webhooks.py"),
+    )
+    chosen, alternatives, _ = _choose(tmp_path, "SSRF in webhook delivery", [other, fix])
+    assert chosen["url"].endswith("6" * 40)
+    assert [a["advisory_words_shared"] for a in alternatives] == [0, 3]
+
+
+def test_advisory_wording_outranks_an_unrelated_commit_touching_installed_files(tmp_path):
+    refactor = (
+        "7" * 40,
+        _patch("7" * 40, "move most metrics-related infrastructure", "core/Metrics.java"),
+    )
+    fix = (
+        "8" * 40,
+        _patch(
+            "8" * 40,
+            "fix memory leak in metrics",
+            "core/MetricsCollector.java",
+            "Avoids out-of-memory.\n",
+        ),
+    )
+    chosen, alternatives, _ = _choose(
+        tmp_path,
+        "Out-of-memory (OOM) issue: memory leak in metrics",
+        [refactor, fix],
+        present=["core/Metrics.java"],
+    )
+    assert (
+        alternatives[0]["files_in_installed_tree"] == 1
+        and alternatives[1]["files_in_installed_tree"] == 0
+    )
+    assert chosen["url"].endswith("8" * 40)
+
+
+def test_file_presence_still_decides_among_patches_naming_the_advisory(tmp_path):
+    backport = (
+        "a" * 40,
+        _patch(
+            "a" * 40, "Fixed CVE-2026-0001 -- protected trunc against SQL injection", "new/trunc.py"
+        ),
+    )
+    followup = "b" * 40, _patch("b" * 40, "Refs CVE-2026-0001 -- escaped parameters", "db/ops.py")
+    chosen, _, _ = _choose(
+        tmp_path, "trunc vulnerable to SQL injection", [backport, followup], present=["db/ops.py"]
+    )
+    assert chosen["url"].endswith("b" * 40)
+
+
+def test_details_words_do_not_outrank_file_presence(tmp_path):
+    present = "c" * 40, _patch("c" * 40, "Fix unsafe regexp", "lib/previous-map.js")
+    backport = "d" * 40, _patch("d" * 40, "Backport ReDoS fixes", "lib/previous-map.es6")
+    chosen, alternatives, _ = _choose(
+        tmp_path,
+        "Regular Expression Denial of Service",
+        [present, backport],
+        present=["lib/previous-map.js"],
+        details="ReDoS during source map parsing.",
+    )
+    assert [a["advisory_words_shared"] for a in alternatives] == [0, 0]
+    assert chosen["url"].endswith("c" * 40)

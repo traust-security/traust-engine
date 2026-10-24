@@ -35,6 +35,7 @@ from traust_engine.applicability.fixes import (
     patch_url,
     references,
     release_like,
+    relevance,
 )
 from traust_engine.applicability.matching import anchor, presence, root_of
 from traust_engine.osv import OsvClient, Query
@@ -140,6 +141,12 @@ def choose_fix(
 ) -> tuple[dict | None, list[dict], str | None]:
     """(chosen, alternatives, patch text) by the score in fixes' docstring."""
     ids = advisory_ids(rec)
+    # The summary is the advisory's distilled claim; details add boilerplate
+    # ("a flaw was found ... may lead to") that unrelated commits share too.
+    wording = rec.get("summary") or rec.get("details") or ""
+    package = next(
+        ((a.get("package") or {}).get("name") or "" for a in rec.get("affected") or []), ""
+    )
     tried = []
     for rank, url in references(rec, fetcher.forges, aliases)[:MAX_PATCHES]:
         purl = patch_url(url)
@@ -156,7 +163,21 @@ def choose_fix(
         _strip, found = anchor(files, root)
         named = any(i in c.message for c in commits for i in ids)
         release = release_like(commits, files)
-        score = (not release, len(found) > 0, named, not only_adds(files), -rank, len(found))
+        shared = relevance(wording, commits, files, package)
+        # Among patches that don't name the advisory, its own words outrank file
+        # presence: a real fix whose files the older installed version lacks
+        # must still beat an unrelated commit that touches files it has. A
+        # patch naming the advisory is already known to be relevant, so file
+        # presence decides among those.
+        score = (
+            not release,
+            named,
+            0 if named else shared,
+            len(found) > 0,
+            not only_adds(files),
+            -rank,
+            len(found),
+        )
         tried.append(
             {
                 "url": url,
@@ -167,6 +188,7 @@ def choose_fix(
                 "names_advisory": named,
                 "only_adds_code": only_adds(files),
                 "release_commit": release,
+                "advisory_words_shared": shared,
                 "commit_date": dating.latest(commits),
                 "_score": score,
                 "_files": files,
