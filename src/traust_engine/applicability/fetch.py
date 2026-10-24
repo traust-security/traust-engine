@@ -65,6 +65,7 @@ class Fetcher:
     registries: frozenset[str] = REGISTRIES
     redirects: dict[str, frozenset[str]] = field(default_factory=lambda: dict(REDIRECTS))
     transport: Transport = _urllib
+    _npm_times: dict[str, dict] = field(default_factory=dict, repr=False)
 
     def get(self, url: str, allowed: frozenset[str]) -> bytes:
         parts = urllib.parse.urlsplit(url)
@@ -88,6 +89,43 @@ class Fetcher:
         blob = self.get(url, self.registries)
         files = extract(blob, kind, dest)
         return {"url": url, "sha256": sha256(blob).hexdigest(), "files": files}
+
+    def release_time(self, ecosystem: str, name: str, version: str) -> str | None:
+        """When the registry published this version (ISO 8601), or None.
+
+        Go, PyPI and npm publish it on hosts the lane already fetches from;
+        Maven Central and crates.io's CDN don't, so those return None.
+        """
+        try:
+            if ecosystem == "Go":
+                v = version if version.startswith("v") else "v" + version
+                info = json.loads(
+                    self.get(
+                        f"https://proxy.golang.org/{go_escape(name)}/@v/{go_escape(v)}.info",
+                        self.registries,
+                    )
+                )
+                return info.get("Time")
+            if ecosystem == "PyPI":
+                meta = json.loads(
+                    self.get(f"https://pypi.org/pypi/{name}/{version}/json", self.registries)
+                )
+                times = sorted(
+                    u["upload_time_iso_8601"]
+                    for u in meta.get("urls") or []
+                    if u.get("upload_time_iso_8601")
+                )
+                return times[0] if times else None
+            if ecosystem == "npm":
+                if name not in self._npm_times:
+                    doc = json.loads(
+                        self.get(f"https://registry.npmjs.org/{name}", self.registries)
+                    )
+                    self._npm_times[name] = doc.get("time") or {}
+                return self._npm_times[name].get(version)
+        except (FetchRefused, OSError, ValueError, KeyError):
+            return None
+        return None
 
     def source_url(self, ecosystem: str, name: str, version: str) -> tuple[str, str]:
         if ecosystem == "Go":

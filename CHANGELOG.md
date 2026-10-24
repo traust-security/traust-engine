@@ -2,6 +2,34 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.43.0]
+
+- **Packets carry the source of the dependencies the fix's code imports.**
+  Some verdicts depend on code the installed package imports, not code it
+  ships: multer 1.4.2's crash depends on what busboy passes it for an empty
+  field name.
+  - **Which dependencies:** when a file the fix touches imports one of the
+    installed version's direct dependencies (up to 3), that dependency's
+    source joins the packet as `dependency_sources`, fetched from its
+    registry. A dependency that can't be resolved or fetched is recorded in
+    `dependency_gaps`.
+  - **Where versions come from:** the module's own go.mod (exact) for Go,
+    and deps.dev's resolved graph (`build(resolver=...)`) for npm, PyPI,
+    Maven and Cargo.
+  - **Result:** in the Phase 3 acceptance run, the one case review couldn't
+    settle (multer, `undetermined` without busboy) is settled. Both blind
+    reviewers read busboy 0.2.14 from the packet and rule `not_applicable`,
+    matching the ground truth.
+- **Packets carry dates for review:**
+  - each candidate fix commit's author date (`commit_date`);
+  - each fixed version's registry publish time (`fix.fixed_releases`, from
+    the Go proxy, PyPI and npm; null elsewhere).
+
+  These are facts, not a ranking. A rule that demoted commits far from the
+  fix release changed no fix choice on the 45 acceptance packets, and was
+  wrong two times in three, because real fixes often ship months later.
+  `Fetcher.release_time` is new.
+
 ## [0.42.2]
 
 - **Fix: release and version-bump commits are recognized in conventional-commit

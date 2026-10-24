@@ -23,6 +23,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from traust_engine.adapters.osv import collect_packages
+from traust_engine.applicability import dating, dependencies
 from traust_engine.applicability.candidates import Candidate, classify, view
 from traust_engine.applicability.fetch import Fetcher, FetchRefused
 from traust_engine.applicability.fixes import (
@@ -166,6 +167,7 @@ def choose_fix(
                 "names_advisory": named,
                 "only_adds_code": only_adds(files),
                 "release_commit": release,
+                "commit_date": dating.latest(commits),
                 "_score": score,
                 "_files": files,
                 "_text": text,
@@ -189,6 +191,7 @@ def build(
     max_candidates: int = 100,
     client: OsvClient | None = None,
     fetcher: Fetcher | None = None,
+    resolver=None,
 ) -> dict:
     """Write one packet directory per candidate under `out`; return the index."""
     client = client or OsvClient()
@@ -220,12 +223,29 @@ def build(
             continue
         root = root_of(src["dir"])
         chosen, tried, text = choose_fix(rec, root, fetcher, aliases)
+        fixed = dating.fixed_versions(view(rec, c.ecosystem, c.package), c.ecosystem, c.package)
+        fixed_releases = [
+            {"version": v, "published": fetcher.release_time(c.ecosystem, c.package, v)}
+            for v in fixed[:6]
+        ]
         if chosen is None:
             gaps.append({"reason": "no_usable_fix_patch", "case": cid, "tried": tried})
             continue
         d.mkdir(parents=True, exist_ok=True)
         (d / "fix.patch").write_text(text or "")
         files = chosen.pop("files_changed")
+        hunks = presence(files, root)
+        touched = [root / h["installed_path"] for h in hunks if h["installed_path"]]
+        dep_sources, dep_gaps = dependencies.gather(
+            c.ecosystem,
+            c.package,
+            c.version,
+            root,
+            touched,
+            resolver,
+            fetcher,
+            src["dir"].parent / "_deps",
+        )
         packet = {
             "case": cid,
             "candidate": asdict(c),
@@ -236,14 +256,23 @@ def build(
                 "details": (rec.get("details") or "")[:6000],
                 "affected": view(rec, c.ecosystem, c.package)["affected"],
             },
-            "fix": {"chosen": chosen, "alternatives": tried},
+            "fix": {"chosen": chosen, "alternatives": tried, "fixed_releases": fixed_releases},
             "installed_source": {
                 "url": src["url"],
                 "sha256": src["sha256"],
                 "files": src["files"],
                 "root": str(root.relative_to(out)),
             },
-            "hunk_presence": presence(files, root),
+            "hunk_presence": hunks,
+            # sources of direct dependencies a file the fix touches imports
+            "dependency_sources": [
+                {
+                    **{k: v for k, v in ds.items() if k != "dir"},
+                    "root": str(root_of(ds["dir"]).relative_to(out)),
+                }
+                for ds in dep_sources
+            ],
+            "dependency_gaps": dep_gaps,
         }
         (d / "packet.json").write_text(json.dumps(packet, indent=1) + "\n")
         packets.append({"case": cid, "kind": c.kind, "ecosystem": c.ecosystem})

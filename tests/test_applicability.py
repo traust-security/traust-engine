@@ -444,3 +444,138 @@ def test_fix_subjects_are_not_release_commits(subject):
 
 def test_a_markdown_only_change_is_not_a_fix():
     assert release_like([], [FileChange("README.md", [{"removed": ["a"], "added": ["b"]}])])
+
+
+# ----------------------------------------------------------------- dating
+
+
+def _dated(subject, date):
+    return Commit("9" * 40, subject, f"From: x\nDate: {date}\nSubject: {subject}\n", [])
+
+
+def test_commit_date_is_read_from_the_patch_header():
+    from traust_engine.applicability.dating import commit_date
+
+    d = commit_date(_dated("fix", "Tue, 23 Apr 2024 18:33:49 +0300"))
+    assert d.isoformat() == "2024-04-23T18:33:49+03:00"
+    assert commit_date(Commit("1" * 40, "x", "no date here", [])) is None
+
+
+def test_packets_carry_commit_and_fix_release_dates(tmp_path):
+    from traust_engine.applicability.dating import latest
+
+    commits = [
+        _dated("a", "Mon, 15 Apr 2024 10:00:00 +0000"),
+        _dated("b", "Tue, 16 Apr 2024 10:00:00 +0000"),
+    ]
+    assert latest(commits) == "2024-04-16T10:00:00+00:00"
+    assert latest([Commit("1" * 40, "x", "no date", [])]) is None
+
+
+def test_release_times_come_from_the_registries():
+    pages = {
+        "https://proxy.golang.org/example.com/lib/@v/v1.4.0.info": b'{"Version":"v1.4.0","Time":"2024-02-01T00:12:23Z"}',
+        "https://pypi.org/pypi/pkg/1.0/json": b'{"urls":[{"upload_time_iso_8601":"2023-11-01T06:59:10Z"}]}',
+        "https://registry.npmjs.org/lib": b'{"time":{"1.2.3":"2022-01-02T03:04:05.000Z"}}',
+    }
+    f = Fetcher(transport=lambda u: (pages[u], u))
+    assert f.release_time("Go", "example.com/lib", "1.4.0") == "2024-02-01T00:12:23Z"
+    assert f.release_time("PyPI", "pkg", "1.0") == "2023-11-01T06:59:10Z"
+    assert f.release_time("npm", "lib", "1.2.3") == "2022-01-02T03:04:05.000Z"
+    assert f.release_time("Maven", "g:a", "1.0") is None
+
+
+# ----------------------------------------------------------------- dependency source
+
+
+def test_go_requires_are_read_from_go_mod(tmp_path):
+    from traust_engine.applicability.dependencies import go_requires
+
+    (tmp_path / "go.mod").write_text(
+        "module example.com/lib\n\nrequire example.com/one v1.2.0\n\nrequire (\n\texample.com/two v0.3.1 // indirect\n)\n"
+    )
+    assert sorted(go_requires(tmp_path)) == [
+        ("example.com/one", "1.2.0"),
+        ("example.com/two", "0.3.1"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "eco,dep,text,expect",
+    [
+        ("npm", "busboy", "var Busboy = require('busboy')", True),
+        ("npm", "busboy", "import Busboy from 'busboy/lib/x'", True),
+        ("npm", "busboy", "var b = require('busboyish')", False),
+        ("PyPI", "Python-Jose", "from python_jose import jwt", True),
+        ("Maven", "org.bouncycastle:bcutil-jdk18on", "import org.bouncycastle.util.Arrays;", True),
+        ("crates.io", "rustls-pki-types", "use rustls_pki_types::CertificateDer;", True),
+        ("Go", "golang.org/x/net", 'import "golang.org/x/net/http2"', True),
+    ],
+)
+def test_imports(eco, dep, text, expect):
+    from traust_engine.applicability.dependencies import imports
+
+    assert imports(eco, dep, text) is expect
+
+
+class _Resolution:
+    def __init__(self, nodes, status="ok"):
+        self.nodes, self.status, self.detail = nodes, status, ""
+
+    @property
+    def ok(self):
+        return self.status == "ok"
+
+
+class _Resolver:
+    def __init__(self, nodes):
+        self.nodes = nodes
+
+    def dependencies(self, eco, name, version):
+        return _Resolution(self.nodes)
+
+
+def _tgz(files):
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_an_imported_direct_dependency_joins_the_packet(tmp_path):
+    from traust_engine.applicability.dependencies import gather
+
+    root = tmp_path / "pkg"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "mw.js").write_text("var Busboy = require('busboy')\n")
+    tarball = _tgz({"package/lib/types/multipart.js": b"// parser"})
+    f = Fetcher(transport=lambda u: (tarball, u))
+    resolver = _Resolver(
+        [
+            ("busboy", "0.2.14", "DIRECT"),
+            ("dicer", "0.2.5", "INDIRECT"),
+            ("xtend", "4.0.2", "DIRECT"),
+        ]
+    )
+    sources, gaps = gather(
+        "npm", "multer", "1.4.2", root, [root / "lib" / "mw.js"], resolver, f, tmp_path / "deps"
+    )
+    assert gaps == [] and [(s["package"], s["version"], s["imported_by"]) for s in sources] == [
+        ("busboy", "0.2.14", ["lib/mw.js"])
+    ]
+    assert (
+        tmp_path / "deps" / "busboy@0.2.14" / "package" / "lib" / "types" / "multipart.js"
+    ).is_file()
+
+
+def test_no_resolver_is_a_recorded_gap(tmp_path):
+    from traust_engine.applicability.dependencies import gather
+
+    (tmp_path / "a.py").write_text("import x\n")
+    sources, gaps = gather(
+        "PyPI", "p", "1.0", tmp_path, [tmp_path / "a.py"], None, Fetcher(), tmp_path / "d"
+    )
+    assert sources == [] and gaps == [{"reason": "no dependency resolver configured"}]
