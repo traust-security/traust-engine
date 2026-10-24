@@ -24,14 +24,6 @@ def test_md_cell_blocks_column_forgery_and_links():
     assert "javascript:" not in esc.md_cell("[x](javascript:alert(1))").lower()
 
 
-def test_fence_untrusted_outlengthens_backtick_runs():
-    hostile = "data\n````\ninjected heading\n````"
-    fenced = esc.fence_untrusted(hostile)
-    fence = fenced.split("\n", 1)[0]
-    assert set(fence) == {"`"} and len(fence) >= 5
-    assert fenced.endswith(fence)
-
-
 def test_csv_cell_neutralizes_formulas_keeps_numbers():
     assert esc.csv_cell("=HYPERLINK(evil)") == "'=HYPERLINK(evil)"
     assert esc.csv_cell("@SUM(A1)") == "'@SUM(A1)"

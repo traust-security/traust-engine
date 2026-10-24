@@ -1,17 +1,6 @@
-"""Tests for traust_engine.corpus.resolver — the corpus resolver.
-
-Two layers:
-1. Synthetic-fixture tests (always run) covering identity splitting,
-   ownership tagging, symlink aliasing, layer preference, dot-repo
-   handling, engagement activation, and drift warnings.
-2. Live-tree pin tests against the 2026-07-17 census ground truth,
-   gated behind CORPUS_LIVE_PINS=1 because the live tree grows with
-   every audit batch; a light smoke test runs whenever the sibling
-   analysis-results/ checkout is present.
-"""
+"""Sanitized corpus-resolver invariants, independent of the operator's live corpus."""
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -20,8 +9,6 @@ import pytest
 # identity
 # ---------------------------------------------------------------------------
 from traust_engine.corpus import resolver as corpus
-
-LIVE_ROOT = Path(__file__).resolve().parents[2] / "analysis-results"
 
 
 @pytest.mark.parametrize(
@@ -346,52 +333,6 @@ def test_population_block_lines_and_roots_description(synthetic):
     assert "**Tool:** demo" in text
     assert "**Files scanned:** 42" in text
     assert "**Warnings:** 2" in text
-
-
-# ---------------------------------------------------------------------------
-# live tree
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skipif(
-    not (LIVE_ROOT / "findings").is_dir(), reason="sibling analysis-results/ not checked out"
-)
-def test_live_smoke():
-    from traust_engine import HarnessEngine
-
-    res = corpus.resolve(LIVE_ROOT, HarnessEngine.load().corpus.config())
-    agg = corpus.aggregates(res)
-    assert agg["trees"]["findings"]["reports"] > 5000
-    assert agg["duplication"]["symlink_aliases"] > 0
-    assert agg["trees"]["findings"]["branch_reaudits"] > 1000
-    # the resolver never counts a symlink as a report
-    links = {a["link"] for a in res.aliases}
-    assert not any(r.audit_json in links for r in res.records if r.audit_json)
-
-
-@pytest.mark.skipif(
-    os.environ.get("CORPUS_LIVE_PINS") != "1",
-    reason="census pins are a point-in-time snapshot; set CORPUS_LIVE_PINS=1 to check them",
-)
-def test_live_census_pins_2026_07_17():
-    """Ground truth from the 2026-07-17 filesystem census. These WILL
-    drift as audit batches land; they exist to prove the resolver
-    reproduces the census methodology, not to freeze the tree."""
-    from traust_engine import HarnessEngine
-
-    res = corpus.resolve(LIVE_ROOT, HarnessEngine.load().corpus.config())
-    agg = corpus.aggregates(res)
-    f = agg["trees"]["findings"]
-    assert f["reports"] == 8047  # audit JSONs plus md-only models
-    assert f["reports_md_only"] == 162
-    assert f["branch_reaudits"] == 4214
-    assert f["unique_base_slugs"] == 3283
-    assert agg["trees"]["OpenStack-k8s-ops"]["reports"] == 61
-    assert agg["trees"]["ecoengg-findings"]["reports"] == 117
-    assert agg["trees"]["oss-findings"]["reports"] == 138
-    d = agg["duplication"]
-    assert d["symlink_aliases"] == 194
-    assert d["symlink_canonical_targets"] == 174
 
 
 def test_harness_qa_tree_registered_but_never_walked(tmp_path):

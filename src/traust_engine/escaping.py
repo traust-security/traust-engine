@@ -1,4 +1,4 @@
-"""Shared escaping/fencing helpers for untrusted text reaching emitters.
+"""Shared escaping helpers for untrusted text reaching emitters.
 
 Public, zero-coupling text-safety helpers — safe for app emitters to import
 directly as ``from traust_engine.escaping import md_cell``.
@@ -13,9 +13,6 @@ Threat model per helper:
 - ``md_cell``       — Markdown table cell: ``|`` forges columns,
                       newlines break the row, link/image syntax turns a
                       hostile title into a live link or fetch beacon.
-- ``fence_untrusted`` — block of hostile text in Markdown: the fence
-                      must be longer than any backtick run inside it,
-                      or the content escapes the fence.
 - ``csv_cell``      — spreadsheet formula injection: a leading ``=``,
                       ``+``, ``-``, ``@``, tab or CR makes Excel/Sheets
                       execute the cell (CWE-1236).
@@ -32,7 +29,6 @@ import re
 __all__ = [
     "csv_cell",
     "esc_html",
-    "fence_untrusted",
     "json_script",
     "md_cell",
     "safe_slug",
@@ -67,18 +63,6 @@ def md_cell(s) -> str:
     out = re.sub(r"\]\(", "]\\(", out)
     out = re.sub(r"\bjavascript:", "javascriptː", out, flags=re.I)
     return out
-
-
-def fence_untrusted(s, info: str = "") -> str:
-    """Wrap hostile text in a Markdown code fence it cannot escape.
-
-    The fence is one backtick longer than the longest backtick run in
-    the content, so embedded ``` sequences stay data.
-    """
-    text = str(s)
-    longest = max((len(m.group(0)) for m in re.finditer(r"`+", text)), default=0)
-    fence = "`" * max(3, longest + 1)
-    return f"{fence}{info}\n{text}\n{fence}"
 
 
 def csv_cell(s) -> str:

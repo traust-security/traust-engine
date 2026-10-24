@@ -783,7 +783,6 @@ def _facts_to_findings(facts: list[dict]) -> list[dict[str, Any]]:
                 "description": _describe(fact),
                 "evidence": evidence,
                 "category": fact["rule_id"],
-                "origin": "opengrep",
             }
         )
     return findings
@@ -800,10 +799,7 @@ def scan(
     *,
     loc: Locations | None = None,
 ) -> AdapterResult:
-    """Run opengrep scan and return typed result.
-
-    Falls back to dict if contracts not available.
-    """
+    """Run opengrep and return typed scanner observations."""
     target = target.resolve()
     try:
         pack = resolve_rule_pack_dir(rule_pack, loc)

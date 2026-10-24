@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -2019,7 +2019,7 @@ wheels = [
 [[package]]
 name = "traust-contracts"
 version = "0.0.0"
-source = { git = "https://github.com/traust-security/traust-contracts.git?rev=1f0cd132d82373f1aeeba4515f2e51828139528a#1f0cd132d82373f1aeeba4515f2e51828139528a" }
+source = { git = "https://github.com/traust-security/traust-contracts.git?rev=ecdf9ae5331828d5175d5b4e17065ee2f14d4e61#ecdf9ae5331828d5175d5b4e17065ee2f14d4e61" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -2029,7 +2029,7 @@ dependencies = [
 [[package]]
 name = "traust-core"
 version = "0.1.0"
-source = { git = "https://github.com/traust-security/traust-core.git?rev=0ccee79099982624ffb38baf61539249e0d48467#0ccee79099982624ffb38baf61539249e0d48467" }
+source = { git = "https://github.com/traust-security/traust-core.git?rev=13b589f2342079a9ee4c73206571ebc54daa8526#13b589f2342079a9ee4c73206571ebc54daa8526" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "traust-engine"
-version = "0.38.0"
+version = "0.38.3"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },
@@ -2095,7 +2095,7 @@ requires-dist = [
     { name = "referencing" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.2" },
     { name = "sigstore", marker = "extra == 'signing'", specifier = ">=4.0,<5.0" },
-    { name = "traust-core", git = "https://github.com/traust-security/traust-core.git?rev=0ccee79099982624ffb38baf61539249e0d48467" },
+    { name = "traust-core", git = "https://github.com/traust-security/traust-core.git?rev=13b589f2342079a9ee4c73206571ebc54daa8526" },
     { name = "tree-sitter", marker = "extra == 'graph'" },
     { name = "tree-sitter-go", marker = "extra == 'graph'" },
     { name = "tree-sitter-javascript", marker = "extra == 'graph'" },

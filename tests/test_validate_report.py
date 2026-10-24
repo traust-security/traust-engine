@@ -13,6 +13,7 @@ import jsonschema
 from traust_contracts.paths import schema_dir as _schema_dir
 
 SCHEMA_DIR = _schema_dir()
+from traust_engine import HarnessEngine
 from traust_engine.reporting import lint, render, validate
 from traust_engine.reporting.render import render_report
 from traust_engine.reporting.validate import (
@@ -1118,11 +1119,6 @@ class TestThreatModelArtifact(unittest.TestCase):
         path.write_text(json.dumps(document), encoding="utf-8")
         return path
 
-    def test_schema_is_auto_detected_from_the_filename(self):
-        detected = validate.detect_schema_path(Path("repo-threat-model.json"))
-        self.assertIsNotNone(detected)
-        self.assertEqual(detected.name, "threat-model.schema.json")
-
     def test_conformant_model_passes_without_code_audit_crosschecks(self):
         """It has no severity_criteria and no metadata.repository, and must
         not be failed for lacking either — those describe a finding report."""
@@ -1211,17 +1207,6 @@ class TestArtifactKindDetection(unittest.TestCase):
         },
     }
 
-    def test_each_kind_is_detected(self):
-        for name, schema in (
-            ("repo-remediation-verification.json", "verification.schema.json"),
-            ("repo-refuted-register.json", "refuted-register.schema.json"),
-            ("repo-priv-profile.json", "operator-priv-profile.schema.json"),
-            ("repo-operator-priv-profile.json", "operator-priv-profile.schema.json"),
-        ):
-            detected = validate.detect_schema_path(Path(name))
-            self.assertIsNotNone(detected, name)
-            self.assertEqual(detected.name, schema, name)
-
     def _validate(self, name, document, strict=False):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / name
@@ -1252,3 +1237,122 @@ class TestArtifactKindDetection(unittest.TestCase):
         result = self._validate("repo-refuted-register.json", document)
         self.assertFalse(result.passed)
         self.assertTrue(any("entries" in e for e in result.errors), result.errors)
+
+
+def _valid_live_validation_report():
+    return {
+        "title": "Live validation of a synthetic application",
+        "metadata": {
+            "date": "2026-10-23",
+            "harness_version": "0.175.0",
+            "scope_binding_mode": "explicit",
+            "target_fingerprint": [],
+        },
+        "source_reports": [{"kind": "security-audit", "path": "source-audit.json"}],
+        "summary": {
+            "by_verdict": {
+                "confirmed": 0,
+                "refuted": 0,
+                "inconclusive": 0,
+                "blocked_by_scope": 0,
+                "not_attempted": 0,
+            },
+            "by_technique": {},
+        },
+        "validated_findings": [],
+        "attack_chains": [],
+        "novel_findings": [],
+        "execution_log_ref": "validation-audit.jsonl",
+    }
+
+
+def _valid_readiness_report():
+    return {
+        "title": "Synthetic PQC readiness assessment",
+        "metadata": {
+            "repository": "https://github.com/example/widget",
+            "assessment_basis": "source",
+            "tool": {"pqc_scan_commit": "fixture", "rules_sha256": "a" * 64},
+        },
+        "summary": {"by_rule": {}},
+        "status": "ready",
+        "who_sets_tls": "this_app",
+        "quantum_ready": "yes_by_default",
+        "why_not": [],
+        "do_next": [],
+        "capabilities": {},
+        "scores": {
+            **{domain: {"score": 0, "checks": []} for domain in ("VULN", "AGIL", "PQCA", "HNDL")},
+            "overall": 0,
+        },
+        "flags": {
+            "has_2030_clock_items": False,
+            "hndl_priority": False,
+            "runtime_verification_required": True,
+        },
+        "provenance_summary": {"counts": {}, "dominant": "none"},
+        "readiness_bucket": "ready",
+    }
+
+
+class TestReportingFamilyDispatch(unittest.TestCase):
+    def setUp(self):
+        self.engine = HarnessEngine.load(config_home=Path(__file__).parent / "fixtures" / "config")
+
+    def test_each_family_enforces_its_own_contract_and_semantics(self):
+        cases = (
+            ("sample-validation.json", _valid_live_validation_report, "validation"),
+            ("sample-verification.json", _valid_verification_report, "verification"),
+            ("sample-pqc-readiness.json", _valid_readiness_report, "readiness"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for name, build, family in cases:
+                with self.subTest(family=family):
+                    document = build()
+                    path = Path(directory) / name
+                    path.write_text(json.dumps(document), encoding="utf-8")
+                    (valid,) = self.engine.reporting.validate(path, strict=True)
+                    self.assertTrue(valid.passed, valid.errors)
+                    if family == "validation":
+                        document["summary"]["by_verdict"]["confirmed"] = 1
+                    elif family == "verification":
+                        document["summary"]["total_findings"] += 1
+                    else:
+                        document["provenance_summary"]["dominant"] = "invented"
+                    path.write_text(json.dumps(document), encoding="utf-8")
+                    (invalid,) = self.engine.reporting.validate(path)
+                    self.assertFalse(invalid.passed, invalid.errors)
+
+    def test_directory_sweep_does_not_validate_readiness_as_an_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, document in (
+                ("sample-validation.json", _valid_live_validation_report()),
+                ("sample-remediation-verification.json", _valid_verification_report()),
+                ("sample-pqc-readiness.json", _valid_readiness_report()),
+            ):
+                (root / name).write_text(json.dumps(document), encoding="utf-8")
+            results = self.engine.reporting.validate(root, strict=True)
+            self.assertEqual(
+                {Path(result.file_path).name for result in results},
+                {
+                    "sample-validation.json",
+                    "sample-remediation-verification.json",
+                    "sample-pqc-readiness.json",
+                },
+            )
+            self.assertTrue(
+                all(result.passed for result in results),
+                [result.errors for result in results if not result.passed],
+            )
+
+    def test_explicit_schema_override_takes_precedence_over_filename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "sample-validation.json"
+            path.write_text(json.dumps(_valid_verification_report()), encoding="utf-8")
+            (automatic,) = self.engine.reporting.validate(path)
+            self.assertFalse(automatic.passed)
+            (explicit,) = self.engine.reporting.validate(
+                path, schema=SCHEMA_DIR / "verification.schema.json"
+            )
+            self.assertTrue(explicit.passed, explicit.errors)

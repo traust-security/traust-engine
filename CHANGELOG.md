@@ -2,6 +2,34 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.38.3]
+
+- Close native scan-to-artifact admission by using the adapter-specific scanner
+  observation contract; unknown CWE/remediation stay unreported rather than
+  invented. Authored report findings remain strict.
+- Keep adapter results out of audit-only report cross-checks. Exercise real
+  bundled Gitleaks observations through artifact publication and reload without
+  creating canonical findings or verdicts.
+
+## [0.38.2]
+
+- Keep scanner tool names and native fingerprints out of finding origin and
+  domain identity fields; preserve declared classifier/dependency provenance.
+- Reject explicit unknown severity and undeclared finding fields instead of
+  silently relabelling or discarding them; retain valid Grype package locations.
+- Consume the finding DTO and atomic scanner-intake fixes through core.
+- **Known open:** actual nonempty Gitleaks output still fails adapter-result
+  artifact admission on required CWE/remediation constraints. Add the real
+  scan-to-artifact acceptance regression; do not count the completed-fixture
+  publication test as native scanner conformance.
+
+## [0.38.1]
+
+- Detect live-validation, verification and PQC-readiness artifacts through the
+  generic file/directory validation path, preserving explicit schema overrides.
+- Apply each family's schema and semantic checks without running audit-report
+  checks against readiness documents.
+
 ## [0.38.0]
 
 - **Breaking: traust-core is the hub.** traust-engine depends on traust-core

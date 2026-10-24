@@ -214,7 +214,6 @@ def _candidates_to_findings(candidates: list[dict]) -> list[dict[str, Any]]:
                 "severity": map_severity(_reachability_to_severity(cand["reachability"])),
                 "locations": locs,
                 "description": desc,
-                "origin": "govulncheck",
                 "category": cand["reachability"],
             }
         )

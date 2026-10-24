@@ -1557,18 +1557,22 @@ def validate_report(
             # thing a schema cannot say: an OWASP rating's scores, levels
             # and severity must follow from its factors.
             cross_validate_threat_model(report, result)
-        elif "refuted-register" in sid or "operator-priv-profile" in sid:
-            # A refuted register (refutation worklist) and an operator
-            # privilege profile are not finding reports: the code-audit
-            # cross-checks (severity_criteria, findings_summary) do not fit
-            # them, so only the schema applies.
+        elif any(
+            family in sid
+            for family in (
+                "refuted-register",
+                "operator-priv-profile",
+                "pqc-readiness",
+                "adapter-result",
+            )
+        ):
+            # These artifacts use their own schema, not audit-report checks.
             pass
         else:
             cross_validate(report, result)
 
     sid = schema.get("$id", "")
-    # Schemas whose findings are not code-audit findings and so carry no
-    # cross-scan fingerprint.
+    # These artifact families do not use authored audit-report identity checks.
     _non_audit = (
         "validation",
         "remediation",
@@ -1584,6 +1588,8 @@ def validate_report(
         "threat-model",
         "refuted-register",
         "operator-priv-profile",
+        "pqc-readiness",
+        "adapter-result",
     )
     # These checks read findings and metadata directly. On a document that
     # is not report-shaped they would raise and abort a whole directory
@@ -1668,6 +1674,10 @@ def detect_schema_path(file_path: Path) -> Path | None:
     name = file_path.name
     if name == "TRIAGE.json" or name.endswith("-triage.json"):
         return SCHEMA_DIR / "triage.schema.json"
+    if name == "validation.json" or name.endswith("-validation.json"):
+        return SCHEMA_DIR / "validation.schema.json"
+    if name == "pqc-readiness.json" or name.endswith("-pqc-readiness.json"):
+        return SCHEMA_DIR / "pqc-readiness.schema.json"
     if name.endswith("-findings-layer.json"):
         return SCHEMA_DIR / "layer.schema.json"
     if name.endswith("-vuln-findings.json"):
@@ -1682,7 +1692,7 @@ def detect_schema_path(file_path: Path) -> Path | None:
         return SCHEMA_DIR / "threat-model.schema.json"
     if name.endswith("-impact-analysis.json"):
         return SCHEMA_DIR / "impact-analysis.schema.json"
-    if name.endswith("-remediation-verification.json"):
+    if name == "verification.json" or name.endswith("-verification.json"):
         return SCHEMA_DIR / "verification.schema.json"
     if name.endswith("-refuted-register.json"):
         return SCHEMA_DIR / "refuted-register.schema.json"
