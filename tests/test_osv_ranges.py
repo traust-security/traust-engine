@@ -171,3 +171,20 @@ def test_version_key_orders_within_an_ecosystem():
     assert version_key("v1.10.0", "Go") > version_key("1.9.3", "Go")
     assert version_key("1.2.0", "PyPI") == version_key("1.2", "PyPI")
     assert version_key("latest", "Go") is None
+
+
+def test_nuget_names_match_case_insensitively():
+    from traust_engine.osv.ranges import spans
+
+    rec = {
+        "affected": [
+            {
+                "package": {"name": "Newtonsoft.Json", "ecosystem": "NuGet"},
+                "ranges": [
+                    {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "13.0.1"}]}
+                ],
+            }
+        ]
+    }
+    assert spans(rec, "newtonsoft.json", "NuGet") == spans(rec, "Newtonsoft.Json", "NuGet") != []
+    assert spans(rec, "newtonsoft.json", "npm") == []

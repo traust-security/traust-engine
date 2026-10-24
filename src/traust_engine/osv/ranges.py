@@ -45,6 +45,10 @@ def _entries(vuln: dict, name: str, ecosystem: str | None, ignore_case: bool):
         if ignore_case:
             if pname and pname.lower() != name.lower():
                 continue
+        elif ecosystem == "NuGet":
+            # NuGet ids are case-insensitive; OSV records use the published casing.
+            if (pname or "").lower() != name.lower():
+                continue
         elif pname != name:
             continue
         if ecosystem and pkg.get("ecosystem") and pkg["ecosystem"] != ecosystem:

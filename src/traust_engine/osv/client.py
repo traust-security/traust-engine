@@ -16,6 +16,11 @@ the same vocabulary the continuous-ops comparison statuses use:
 A caller reports any non-zero count as degraded coverage, never as
 "no advisories". ``probe`` lets a caller find out up front that the API
 cannot be used at all, and fail fast instead of retrying every batch.
+
+OSV matches NuGet ids case-sensitively while NuGet treats them as
+case-insensitive. Given ``nuget_ids``, a NuGet lookup that comes back empty
+is retried once under nuget.org's casing; ``recased`` records each id it
+changed.
 """
 
 from __future__ import annotations
@@ -27,7 +32,11 @@ import urllib.request
 from collections import Counter
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from traust_engine.osv.nuget import NugetIds
 
 DEFAULT_BASE_URL = "https://api.osv.dev/v1"
 USER_AGENT = "traust-engine-osv-client"
@@ -93,6 +102,7 @@ class OsvClient:
         workers: int = 4,
         opener: Callable | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        nuget_ids: NugetIds | None = None,
     ) -> None:
         self.base_url = normalize_base_url(base_url)
         self.timeout = timeout
@@ -102,6 +112,8 @@ class OsvClient:
         self.workers = max(1, workers)
         self._open = opener or urllib.request.urlopen
         self._sleep = sleep
+        self.nuget_ids = nuget_ids
+        self.recased: dict[str, str] = {}  # NuGet id as written -> as published
 
     # -- transport ---------------------------------------------------------
 
@@ -157,6 +169,25 @@ class OsvClient:
 
     def query_batch(self, queries: list[Query]) -> BatchOutcome:
         """Advisory ids for each query; failures are ``None`` plus a counted status."""
+        outcome = self._query_batch(queries)
+        if self.nuget_ids is None:
+            return outcome
+        retry = {}
+        for i, (q, ids) in enumerate(zip(queries, outcome.ids, strict=True)):
+            if q.ecosystem == "NuGet" and ids == []:
+                cid = self.nuget_ids.canonical(q.name)
+                if cid and cid != q.name:
+                    retry[i] = replace(q, name=cid)
+        if not retry:
+            return outcome
+        again = self._query_batch(list(retry.values()))
+        out = list(outcome.ids)
+        for (i, q), ids in zip(retry.items(), again.ids, strict=True):
+            out[i] = ids  # None when the retry failed: counted below, never empty
+            self.recased[queries[i].name] = q.name
+        return BatchOutcome(out, outcome.issues + again.issues)
+
+    def _query_batch(self, queries: list[Query]) -> BatchOutcome:
         out: list[list[str] | None] = [None] * len(queries)
         issues: Counter = Counter()
         for start in range(0, len(queries), self.batch_size):
