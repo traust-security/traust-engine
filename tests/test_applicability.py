@@ -9,7 +9,13 @@ from collections import Counter
 import pytest
 
 from traust_engine.applicability import BELOW_RANGE, GAP, classify
-from traust_engine.applicability.fetch import Fetcher, FetchRefused, extract
+from traust_engine.applicability.fetch import (
+    Fetcher,
+    FetchRefused,
+    archive_url,
+    extract,
+    nuget_version,
+)
 from traust_engine.applicability.fixes import (
     Commit,
     FileChange,
@@ -386,6 +392,10 @@ def test_exact_installs_per_ecosystem():
     assert exact("Maven", "2.13.4", "manifest-floor") and exact("Go", "1.4.0", "manifest-floor")
     assert not exact("PyPI", "2.2", "manifest-floor") and exact("PyPI", "2.2.2", "locked")
     assert not exact("PyPI", "2.2.2", "resolved") and not exact("Go", "1.22.0", "go-directive")
+    assert exact("NuGet", "13.0.1", "manifest-floor") and not exact(
+        "NuGet", "2.1", "manifest-floor"
+    )
+    assert exact("RubyGems", "2.2.8", "locked") and not exact("RubyGems", "6.4.0", "manifest-floor")
 
 
 def test_maven_sources_anchor_below_the_module_source_root(tmp_path):
@@ -419,6 +429,7 @@ def test_redirects_are_configurable():
         "chore(master): release 10.0.5 (#1864)",
         "[6.0.x] Bumped version for 6.0.6 release.",
         "Release Wasmtime 46.0.3 (#14170)",
+        "Version Packages (#13362)",
     ],
 )
 def test_release_subjects_seen_in_real_fix_links(subject):
@@ -435,6 +446,7 @@ def test_release_subjects_seen_in_real_fix_links(subject):
         "[PR #8652/b0536ae6 backport][3.10] Do not follow symlinks for compressed file variants",
         "Merge commit from fork",
         "Release the lock before returning",
+        "fix: version packages resolution in monorepo",
     ],
 )
 def test_fix_subjects_are_not_release_commits(subject):
@@ -483,6 +495,17 @@ def test_release_times_come_from_the_registries():
     assert f.release_time("PyPI", "pkg", "1.0") == "2023-11-01T06:59:10Z"
     assert f.release_time("npm", "lib", "1.2.3") == "2022-01-02T03:04:05.000Z"
     assert f.release_time("Maven", "g:a", "1.0") is None
+
+
+def test_rubygems_release_time_skips_platform_builds():
+    rows = (
+        b'[{"number":"2.2.8","platform":"java","created_at":"2023-01-01T00:00:00Z"},'
+        b'{"number":"2.2.8","platform":"ruby","created_at":"2023-07-31T01:02:03Z"}]'
+    )
+    url = "https://rubygems.org/api/v1/versions/rack.json"
+    f = Fetcher(transport=lambda u: ({url: rows}[u], u))
+    assert f.release_time("RubyGems", "rack", "2.2.8") == "2023-07-31T01:02:03Z"
+    assert f.release_time("NuGet", "Newtonsoft.Json", "13.0.1") is None
 
 
 # ----------------------------------------------------------------- dependency source
@@ -579,3 +602,151 @@ def test_no_resolver_is_a_recorded_gap(tmp_path):
         "PyPI", "p", "1.0", tmp_path, [tmp_path / "a.py"], None, Fetcher(), tmp_path / "d"
     )
     assert sources == [] and gaps == [{"reason": "no dependency resolver configured"}]
+
+
+# ------------------------------------------------------------ RubyGems and NuGet
+
+
+def _gem(files: dict[str, str]) -> bytes:
+    inner = io.BytesIO()
+    with tarfile.open(fileobj=inner, mode="w:gz") as tf:
+        for name, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    outer = io.BytesIO()
+    with tarfile.open(fileobj=outer, mode="w") as tf:
+        for name, data in (("metadata.gz", b"x"), ("data.tar.gz", inner.getvalue())):
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return outer.getvalue()
+
+
+def test_a_gem_extracts_its_data_archive(tmp_path):
+    n = extract(
+        _gem({"lib/rack/utils.rb": "module Rack; end\n", "../escape.rb": "x"}), "gem", tmp_path
+    )
+    assert n == 1 and (tmp_path / "lib/rack/utils.rb").is_file()
+    assert Fetcher().source_url("RubyGems", "rack", "2.2.8") == (
+        "https://rubygems.org/downloads/rack-2.2.8.gem",
+        "gem",
+    )
+
+
+def test_nuget_versions_normalize_as_the_flat_container_names_them():
+    assert nuget_version("1.23.0") == "1.23.0"
+    assert nuget_version("1.0.0.0") == "1.0.0"
+    assert nuget_version("1.01.2+build.5") == "1.1.2"
+    assert nuget_version("2.0.0-Preview.1") == "2.0.0-preview.1"
+
+
+def test_archive_urls_for_declared_repositories():
+    c = "e" * 40
+    assert archive_url("https://github.com/microsoft/kiota", c) == (
+        f"https://github.com/microsoft/kiota/archive/{c}.tar.gz"
+    )
+    assert archive_url("https://github.com/dotnet/runtime.git", c) == (
+        f"https://github.com/dotnet/runtime/archive/{c}.tar.gz"
+    )
+    assert archive_url("https://gitlab.com/grp/sub/proj", c) == (
+        f"https://gitlab.com/grp/sub/proj/-/archive/{c}/proj-{c}.tar.gz"
+    )
+    for bad in (
+        "https://dev.azure.com/org/proj",
+        "https://github.com/a/../b",
+        "https://github.com/a",
+    ):
+        with pytest.raises(FetchRefused):
+            archive_url(bad, c)
+    with pytest.raises(FetchRefused):
+        archive_url("https://github.com/a/b", "not-a-commit")
+
+
+NUSPEC = (
+    '<?xml version="1.0"?><package><metadata><id>Microsoft.OpenApi.Kiota.Builder</id>'
+    "<version>1.23.0</version>"
+    '<repository type="git" url="https://github.com/microsoft/kiota" commit="' + "e" * 40 + '" />'
+    "</metadata></package>"
+)
+NUSPEC_URL = (
+    "https://api.nuget.org/v3-flatcontainer/microsoft.openapi.kiota.builder/1.23.0/"
+    "microsoft.openapi.kiota.builder.nuspec"
+)
+
+
+def _tarball(top: str, files: dict[str, str]) -> bytes:
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, text in files.items():
+            data = text.encode()
+            info = tarfile.TarInfo(f"{top}/{name}")
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+def test_nuget_source_is_the_archive_at_the_declared_commit(tmp_path):
+    archive = "https://github.com/microsoft/kiota/archive/" + "e" * 40 + ".tar.gz"
+    final = "https://codeload.github.com/microsoft/kiota/tar.gz/" + "e" * 40
+    bodies = {
+        NUSPEC_URL: (NUSPEC.encode(), NUSPEC_URL),
+        archive: (_tarball("kiota-" + "e" * 40, {"src/A.cs": "class A {}\n"}), final),
+    }
+    calls = []
+
+    def transport(u):
+        calls.append(u)
+        return bodies[u]
+
+    f = Fetcher(transport=transport)
+    assert (
+        f.nuget_id("microsoft.openapi.kiota.builder", "1.23.0") == "Microsoft.OpenApi.Kiota.Builder"
+    )
+    src = f.source("NuGet", "Microsoft.OpenApi.Kiota.Builder", "1.23.0", tmp_path / "s")
+    assert src["files"] == 1 and src["url"] == archive
+    assert src["declared_by"] == {
+        "nuspec": NUSPEC_URL,
+        "repository": "https://github.com/microsoft/kiota",
+        "commit": "e" * 40,
+    }
+    assert calls.count(NUSPEC_URL) == 1  # fetched once, reused
+
+
+def test_a_nuspec_without_a_commit_is_refused():
+    text = NUSPEC.replace(' commit="' + "e" * 40 + '"', "")
+    f = Fetcher(transport=lambda u: (text.encode(), u))
+    with pytest.raises(FetchRefused):
+        f.nuget_declared("Microsoft.OpenApi.Kiota.Builder", "1.23.0")
+
+
+def test_nuget_ids_take_the_publishers_casing_or_become_a_gap(tmp_path):
+    from traust_engine.applicability.packet import nuget_ids
+
+    def transport(u):
+        if u == NUSPEC_URL:
+            return NUSPEC.encode(), u
+        raise OSError("404")
+
+    pkgs = [
+        ("NuGet", "microsoft.openapi.kiota.builder", "1.23.0"),
+        ("NuGet", "gone.package", "1.0.0"),
+        ("npm", "lodash", "4.17.21"),
+    ]
+    out, gaps = nuget_ids(pkgs, Fetcher(transport=transport))
+    assert out == [
+        ("NuGet", "Microsoft.OpenApi.Kiota.Builder", "1.23.0"),
+        ("npm", "lodash", "4.17.21"),
+    ]
+    assert [(g["reason"], g["package"]) for g in gaps] == [("nuget_id_unresolved", "gone.package")]
+
+
+def test_ruby_version_files_mark_a_release_commit():
+    bump = [
+        FileChange("lib/kramdown/version.rb", []),
+        FileChange("doc/news/release_2_3_1.page", []),
+    ]
+    assert release_like([], bump)
+    dep_fix = [FileChange("Gemfile.lock", []), FileChange("src/App/App.csproj", [])]
+    assert not release_like([], dep_fix)

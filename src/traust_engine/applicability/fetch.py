@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tarfile
 import urllib.parse
 import urllib.request
@@ -31,15 +32,22 @@ REGISTRIES = frozenset(
         "registry.npmjs.org",
         "repo1.maven.org",
         "static.crates.io",
+        "rubygems.org",
+        "api.nuget.org",
+        # A NuGet package ships compiled assemblies; its source is the forge
+        # archive at the commit its nuspec declares.
+        "github.com",
     }
 )
 # Hosts a fetch may be redirected to, keyed by the host it started on.
 REDIRECTS = {
-    "github.com": frozenset({"patch-diff.githubusercontent.com"}),
+    "github.com": frozenset({"patch-diff.githubusercontent.com", "codeload.github.com"}),
     "gitlab.com": frozenset({"gitlab.com"}),
     "proxy.golang.org": frozenset({"storage.googleapis.com"}),
 }
 MAX_BYTES = 200 * 1024 * 1024
+COMMIT = re.compile(r"[0-9a-f]{40}")
+SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 # crates.io asks bots to identify themselves with contact details.
 USER_AGENT = "traust-applicability (+https://github.com/traust-security/traust)"
 
@@ -66,6 +74,8 @@ class Fetcher:
     redirects: dict[str, frozenset[str]] = field(default_factory=lambda: dict(REDIRECTS))
     transport: Transport = _urllib
     _npm_times: dict[str, dict] = field(default_factory=dict, repr=False)
+    _gem_times: dict[str, dict] = field(default_factory=dict, repr=False)
+    _nuspecs: dict[tuple[str, str], tuple[str, str]] = field(default_factory=dict, repr=False)
 
     def get(self, url: str, allowed: frozenset[str]) -> bytes:
         parts = urllib.parse.urlsplit(url)
@@ -85,16 +95,54 @@ class Fetcher:
 
     def source(self, ecosystem: str, name: str, version: str, dest: Path) -> dict:
         """Extract the installed version's source under `dest`; return its provenance."""
+        declared = self.nuget_declared(name, version) if ecosystem == "NuGet" else None
         url, kind = self.source_url(ecosystem, name, version)
         blob = self.get(url, self.registries)
         files = extract(blob, kind, dest)
-        return {"url": url, "sha256": sha256(blob).hexdigest(), "files": files}
+        out = {"url": url, "sha256": sha256(blob).hexdigest(), "files": files}
+        if declared:
+            out["declared_by"] = declared
+        return out
+
+    def nuspec(self, name: str, version: str) -> tuple[str, str]:
+        """(url, text) of a NuGet package version's nuspec, fetched once."""
+        ident, ver = name.lower(), nuget_version(version)
+        if (ident, ver) not in self._nuspecs:
+            url = f"https://api.nuget.org/v3-flatcontainer/{ident}/{ver}/{ident}.nuspec"
+            text = self.get(url, self.registries).decode("utf-8", errors="replace")
+            self._nuspecs[(ident, ver)] = (url, text)
+        return self._nuspecs[(ident, ver)]
+
+    def nuget_id(self, name: str, version: str) -> str:
+        """The package id as its publisher cased it. NuGet ids are
+        case-insensitive but OSV's NuGet lookup is not, and lockfiles and
+        manifests carry whatever casing the project wrote."""
+        _url, text = self.nuspec(name, version)
+        m = re.search(r"<id>\s*([A-Za-z0-9_.-]+)\s*</id>", text)
+        if not m or m.group(1).lower() != name.lower():
+            raise FetchRefused(f"nuspec id does not match {name}")
+        return m.group(1)
+
+    def nuget_declared(self, name: str, version: str) -> dict:
+        """The repository and commit a NuGet package's nuspec says it was built from.
+
+        The package itself holds compiled assemblies, so this declaration is how
+        its source is found. It is the publisher's claim, recorded as such.
+        """
+        url, text = self.nuspec(name, version)
+        tag = re.search(r"<repository\b[^>]*>", text)
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', tag.group(0))) if tag else {}
+        repo, commit = attrs.get("url", ""), attrs.get("commit", "").lower()
+        if not repo or not COMMIT.fullmatch(commit):
+            raise FetchRefused(f"nuspec declares no source repository and commit: {url}")
+        return {"nuspec": url, "repository": repo, "commit": commit}
 
     def release_time(self, ecosystem: str, name: str, version: str) -> str | None:
         """When the registry published this version (ISO 8601), or None.
 
-        Go, PyPI and npm publish it on hosts the lane already fetches from;
-        Maven Central and crates.io's CDN don't, so those return None.
+        Go, PyPI, npm and RubyGems publish it on hosts the lane already fetches
+        from; Maven Central, crates.io's CDN and NuGet's flat container don't,
+        so those return None.
         """
         try:
             if ecosystem == "Go":
@@ -116,6 +164,19 @@ class Fetcher:
                     if u.get("upload_time_iso_8601")
                 )
                 return times[0] if times else None
+            if ecosystem == "RubyGems":
+                if name not in self._gem_times:
+                    rows = json.loads(
+                        self.get(
+                            f"https://rubygems.org/api/v1/versions/{name}.json", self.registries
+                        )
+                    )
+                    self._gem_times[name] = {
+                        r["number"]: r.get("created_at")
+                        for r in rows
+                        if r.get("platform", "ruby") == "ruby"
+                    }
+                return self._gem_times[name].get(version)
             if ecosystem == "npm":
                 if name not in self._npm_times:
                     doc = json.loads(
@@ -154,7 +215,41 @@ class Fetcher:
                 raise FetchRefused(f"not a Maven group:artifact: {name}")
             base = f"https://repo1.maven.org/maven2/{group.replace('.', '/')}/{artifact}/{version}"
             return f"{base}/{artifact}-{version}-sources.jar", "zip"
+        if ecosystem == "RubyGems":
+            return f"https://rubygems.org/downloads/{name}-{version}.gem", "gem"
+        if ecosystem == "NuGet":
+            d = self.nuget_declared(name, version)
+            return archive_url(d["repository"], d["commit"]), "tar"
         raise FetchRefused(f"ecosystem not supported yet: {ecosystem}")
+
+
+def nuget_version(version: str) -> str:
+    """NuGet's normalized form, as its flat container names files: lower case,
+    no build metadata, no leading zeros, and no fourth part when it is 0."""
+    core, _, pre = version.lower().split("+", 1)[0].partition("-")
+    parts = [str(int(p)) if p.isdigit() else p for p in core.split(".")]
+    if len(parts) == 4 and parts[3] == "0":
+        parts = parts[:3]
+    return ".".join(parts) + (f"-{pre}" if pre else "")
+
+
+def archive_url(repository: str, commit: str) -> str:
+    """The source archive of `repository` at `commit`, on GitHub or GitLab.
+
+    The repository URL comes from the package, so only plain path segments are
+    accepted; the host is always one of the two literals."""
+    parts = urllib.parse.urlsplit(repository.strip())
+    path = parts.path.strip("/").removesuffix(".git")
+    if not COMMIT.fullmatch(commit) or not all(SEGMENT.fullmatch(x) for x in path.split("/")):
+        raise FetchRefused(f"not a plain repository path: {repository}")
+    if parts.scheme in ("https", "http", "git") and parts.hostname == "github.com":
+        owner_repo = "/".join(path.split("/")[:2])
+        if owner_repo.count("/") == 1:
+            return f"https://github.com/{owner_repo}/archive/{commit}.tar.gz"
+    if parts.scheme in ("https", "http") and parts.hostname == "gitlab.com" and "/" in path:
+        name = path.rsplit("/", 1)[-1]
+        return f"https://gitlab.com/{path}/-/archive/{commit}/{name}-{commit}.tar.gz"
+    raise FetchRefused(f"source repository not on a supported forge: {repository}")
 
 
 def go_escape(path: str) -> str:
@@ -163,7 +258,19 @@ def go_escape(path: str) -> str:
 
 
 def extract(blob: bytes, kind: str, dest: Path) -> int:
-    """Regular files only, each kept inside `dest`; links and escapes are skipped."""
+    """Regular files only, each kept inside `dest`; links and escapes are skipped.
+
+    A `.gem` is a tar holding the gem's files as `data.tar.gz`; that inner
+    archive is what is extracted."""
+    if kind == "gem":
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:") as tf:
+            member = next(
+                (m for m in tf.getmembers() if m.name == "data.tar.gz" and m.isfile()), None
+            )
+            inner = tf.extractfile(member) if member else None
+            if inner is None:
+                raise FetchRefused("gem has no data.tar.gz")
+            return extract(inner.read(MAX_BYTES + 1), "tar", dest)
     dest.mkdir(parents=True, exist_ok=True)
     root = dest.resolve()
 
