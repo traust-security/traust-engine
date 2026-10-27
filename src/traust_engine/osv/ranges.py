@@ -154,6 +154,22 @@ def containing_span(
     return None
 
 
+def covers(vuln: dict, name: str, ecosystem: str | None, installed: str | None) -> bool | None:
+    """Whether the record marks ``installed`` affected; None when the version, or a
+    bound that would decide it, can't be ordered (never read as "not affected")."""
+    order = _Order(ecosystem)
+    have = order.key(installed)
+    if have is None:
+        return None
+    undecided = False
+    for span in spans(vuln, name, ecosystem):
+        hit = order.contains(span, have)
+        if hit:
+            return True
+        undecided = undecided or hit is None
+    return None if undecided else False
+
+
 def fixed_for(
     vuln: dict,
     name: str,
