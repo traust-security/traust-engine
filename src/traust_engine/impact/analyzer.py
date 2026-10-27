@@ -43,6 +43,7 @@ from traust_engine._util.versions import parse_semver as parse_semver  # re-expo
 from traust_engine._util.versions import parse_version
 from traust_engine.adapters.govulncheck import parse_stream
 from traust_engine.assets import harness_version as engine_harness_version
+from traust_engine.impact.advisory import ResolvedAdvisory
 from traust_engine.portfolio import parsers as MP
 from traust_engine.portfolio.graph import db_connect, q_blast_radius, q_imports_package
 
@@ -275,6 +276,16 @@ class AnalysisContext:
     con: sqlite3.Connection
     ecosystem: str = "go"
     results_loc: str | None = None
+    # The fetched record; when set it decides every range question, and the two
+    # strings above are its rendering for the artifact.
+    advisory: ResolvedAdvisory | None = None
+
+    def in_range(self, version: str | None) -> bool | None:
+        if self.advisory is not None:
+            return self.advisory.in_range(version)
+        return version_in_range(
+            version or "", self.vulnerable_range, self.fixed_version, self.ecosystem
+        )
 
 
 # ---- Go analyzer
@@ -509,9 +520,7 @@ class LockfileAnalyzer(LanguageAnalyzer):
             if pins:
                 ver = next(iter(pins.values()))
                 evidence.manifest_version = ver
-                in_range = version_in_range(
-                    ver, ctx.vulnerable_range, ctx.fixed_version, ctx.ecosystem
-                )
+                in_range = ctx.in_range(ver)
                 if in_range is False:
                     evidence.manifest_scan = "module_pinned_out_of_range"
                 else:
@@ -1031,9 +1040,7 @@ class SurfaceAnalyzer(LanguageAnalyzer):
             if pins:
                 ver = next(iter(pins.values()))
                 evidence.manifest_version = ver
-                in_range = version_in_range(
-                    ver, ctx.vulnerable_range, ctx.fixed_version, ctx.ecosystem
-                )
+                in_range = ctx.in_range(ver)
                 evidence.manifest_scan = (
                     "module_pinned_out_of_range" if in_range is False else "module_pinned_in_range"
                 )
@@ -1350,7 +1357,7 @@ def sbom_cross_check(repo_id: str, evidence: RepoEvidence, ctx: AnalysisContext)
                 if module_l == name or module_l in purl:
                     ver = comp.get("version") or ""
                     evidence.sbom_shipped_version = ver
-                    in_range = version_in_range(ver, ctx.vulnerable_range, ctx.fixed_version)
+                    in_range = ctx.in_range(ver)
                     evidence.sbom_scan = (
                         "shipped_out_of_range" if in_range is False else "shipped_in_range"
                     )
@@ -1441,8 +1448,7 @@ class ImpactParams:
     cve: str
     module: str
     ecosystem: str = "go"
-    vulnerable_range: str = ""
-    fixed_version: str | None = None
+    advisory: ResolvedAdvisory | None = None
     symbols: str = ""
     packages: str = ""
     feature_desc: str | None = None
@@ -1452,6 +1458,9 @@ class ImpactParams:
 
 
 def _execute(params: ImpactParams, db_path: Path, results_loc: str | None = None) -> int:
+    advisory = params.advisory
+    if advisory is None:
+        raise ValueError("impact analysis needs the fetched advisory record (advisory.resolve)")
     vuln_symbols = [s.strip() for s in params.symbols.split(",") if s.strip()]
     vuln_packages = [p.strip() for p in params.packages.split(",") if p.strip()]
     out_path = (
@@ -1465,13 +1474,14 @@ def _execute(params: ImpactParams, db_path: Path, results_loc: str | None = None
         module=params.module,
         packages=vuln_packages,
         symbols=vuln_symbols,
-        vulnerable_range=params.vulnerable_range,
-        fixed_version=params.fixed_version,
+        vulnerable_range=advisory.vulnerable_range,
+        fixed_version=advisory.fixed_version,
         feature_desc=params.feature_desc,
         db_path=db_path,
         con=con,
         ecosystem=params.ecosystem,
         results_loc=results_loc,
+        advisory=advisory,
     )
 
     # --- Blast radius from portfolio graph
@@ -1521,9 +1531,7 @@ def _execute(params: ImpactParams, db_path: Path, results_loc: str | None = None
         indirect = entry.get("indirect", False)
 
         ev = RepoEvidence()
-        ev.l1_version_in_range = version_in_range(
-            version or "", params.vulnerable_range, params.fixed_version, params.ecosystem
-        )
+        ev.l1_version_in_range = ctx.in_range(version)
 
         if repo_id in l4_data:
             ev.l4_package_imported = True
@@ -1613,12 +1621,12 @@ def _execute(params: ImpactParams, db_path: Path, results_loc: str | None = None
             "cve": params.cve,
             "module": params.module,
             "ecosystem": params.ecosystem,
-            "vulnerable_range": params.vulnerable_range,
-            "fixed_version": params.fixed_version,
+            "vulnerable_range": advisory.vulnerable_range,
+            "fixed_version": advisory.fixed_version,
             "vulnerable_symbols": vuln_symbols,
             "vulnerable_packages": vuln_packages,
             "feature_description": params.feature_desc,
-            "advisory_sources": [],
+            "advisory_sources": list(advisory.sources),
             "portfolio_graph_db": str(db_path),
             "portfolio_graph_version": None,
             "harness_version": harness_version(),

@@ -2,6 +2,34 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.45.0]
+
+- **Impact analysis takes the advisory from its OSV record, not from the
+  caller.**
+  - **The problem:** `analyze` used whatever `vulnerable_range` and
+    `fixed_version` it was given, and wrote `advisory_sources: []`. All 266
+    artifacts on record carry no source. A typed or recalled range still
+    decided every repo's verdict, and the artifact couldn't show where it
+    came from.
+  - **The change:** `ImpactOps.analyze(osv_url=..., advisory_file=...)`
+    fetches the record by id (`OsvClient.get_vulns`). An id OSV doesn't
+    serve for the package, such as a CVE whose records are GHSA/PYSEC
+    entries, is found through the package's advisories. Every record used
+    goes into `advisory_sources`. The record's spans decide every range
+    question: the L1 graph pin, lockfile pins and SBOM versions. That keeps
+    lower bounds and separate release lines that a single `< fix` string
+    lost. `vulnerable_range` renders the spans (`<1.5.0 || >=2.0.0 <2.3.0`),
+    and `fixed_version` is the highest fix.
+  - **Not assessed:** a record that can't be fetched, or that names no
+    affected version of the module, exits 2. That includes ecosystems OSV
+    doesn't publish: docker and helm.
+  - **Air-gapped runs** pass `advisory_file`, an OSV record exported on a
+    connected host. Its `file://` path is the recorded source.
+  - `vulnerable_range` and `fixed_version` are gone from `analyze` and
+    `ImpactParams`. Callers pass `osv_url` from their feeds registry.
+- `osv.ranges.covers()`: whether a record marks a version affected, or None
+  when a bound can't be ordered.
+
 ## [0.44.2]
 
 - **Fixed: impact analysis called installed PyPI/npm dependencies

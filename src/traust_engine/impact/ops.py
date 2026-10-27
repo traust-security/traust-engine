@@ -49,8 +49,8 @@ class ImpactOps(ContextOps):
         cve: str,
         module: str,
         ecosystem: str = "go",
-        vulnerable_range: str = "",
-        fixed_version: str | None = None,
+        osv_url: str | None = None,
+        advisory_file: str | None = None,
         symbols: str = "",
         packages: str = "",
         feature_desc: str | None = None,
@@ -59,20 +59,31 @@ class ImpactOps(ContextOps):
         skip_scan: bool = False,
         db: str | None = None,
     ) -> int:
+        """Analyze one advisory across the portfolio graph.
+
+        The range and fixed version come from the advisory's OSV record, fetched
+        from ``osv_url`` (the deployment's feeds) or read from ``advisory_file``
+        when the API is unreachable; a caller never supplies them."""
+        import sys
+
+        from traust_engine.impact.advisory import AdvisoryUnavailable, resolve
         from traust_engine.impact.analyzer import ImpactParams, _execute, valid_advisory_id
 
         if not valid_advisory_id(cve):
-            import sys
-
             print(f"ERROR: '{cve}' is not a valid advisory ID", file=sys.stderr)
             return 2
+        try:
+            advisory = resolve(cve, module, ecosystem, osv_url=osv_url, advisory_file=advisory_file)
+        except AdvisoryUnavailable as e:
+            print(f"ERROR: {cve} not assessed: {e}", file=sys.stderr)
+            return 2
+        print(f"Advisory {', '.join(advisory.sources)}: {module} {advisory.vulnerable_range}")
 
         params = ImpactParams(
             cve=cve,
             module=module,
             ecosystem=ecosystem,
-            vulnerable_range=vulnerable_range,
-            fixed_version=fixed_version,
+            advisory=advisory,
             symbols=symbols,
             packages=packages,
             feature_desc=feature_desc,
