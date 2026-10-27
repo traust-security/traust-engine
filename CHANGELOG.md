@@ -2,6 +2,20 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.46.0]
+
+- **Code-verified versions can count as affected, with evidence.**
+  dependency-watch's below-range lane verifies, with two blind reviews and a
+  judge, that an installed version below an advisory's stated range is
+  affected. It used to file those cases by typing its own range, which 0.45.0
+  removed. `ImpactOps.analyze(verified_versions=..., verified_by=...)` now
+  counts each listed version affected only when the verdicts file holds a
+  final `applicable` verdict for that package, version and advisory (the
+  packet's candidate). The artifact shows them as `|| =<v> (verified)`, and
+  the verdicts file joins `advisory_sources`. A version without such a
+  verdict leaves the advisory not assessed (exit 2), as does one of the two
+  arguments without the other.
+
 ## [0.45.0]
 
 - **Impact analysis takes the advisory from its OSV record, not from the

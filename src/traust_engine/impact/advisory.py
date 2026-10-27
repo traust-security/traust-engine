@@ -8,10 +8,12 @@ decides every repo's verdict; the record's URL goes into ``advisory_sources``.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from traust_engine.adapters.osv import OSV_ECOSYSTEM
+from traust_engine.applicability.candidates import normalize
 from traust_engine.osv import OsvClient
 from traust_engine.osv.client import Query
 from traust_engine.osv.ranges import Span, covers, spans, version_key
@@ -29,6 +31,9 @@ class ResolvedAdvisory:
     sources: tuple[str, ...]
     module: str
     osv_ecosystem: str
+    # Versions code review verified affected although the record leaves them out
+    # (dependency-watch's below-range lane); see `with_verified`.
+    verified: tuple[str, ...] = ()
 
     @property
     def spans(self) -> list[Span]:
@@ -41,6 +46,11 @@ class ResolvedAdvisory:
 
     def in_range(self, version: str | None) -> bool | None:
         """Whether any record marks ``version`` affected; None when it can't be decided."""
+        key = version_key(version, self.osv_ecosystem)
+        if key is not None and any(
+            version_key(v, self.osv_ecosystem) == key for v in self.verified
+        ):
+            return True
         verdicts = [covers(r, self._name(r), self.osv_ecosystem, version) for r in self.records]
         if True in verdicts:
             return True
@@ -62,6 +72,7 @@ class ResolvedAdvisory:
             low = "" if s.introduced == "0" else f">={s.introduced}"
             high = f"<{s.fixed}" if s.fixed else f"<={s.last_affected}" if s.last_affected else ""
             parts.append(" ".join(p for p in (low, high) if p) or "*")
+        parts += [f"={v} (verified)" for v in self.verified]
         return " || ".join(dict.fromkeys(parts))
 
     @property
@@ -71,6 +82,55 @@ class ResolvedAdvisory:
         if not fixes:
             return None
         return max(fixes, key=lambda f: version_key(f, self.osv_ecosystem) or ())
+
+
+def with_verified(
+    advisory: ResolvedAdvisory, versions: Sequence[str], verdicts_file: str
+) -> ResolvedAdvisory:
+    """Count ``versions`` affected on the strength of below-range review verdicts.
+
+    Each version needs a row in ``verdicts_file`` whose final ``verdict`` is
+    `applicable` for this package, that version and this advisory (its candidate as
+    the packet states it). The file joins ``sources``; a free-form range never does.
+    """
+    path = Path(verdicts_file).resolve()
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        raise AdvisoryUnavailable(f"{verdicts_file}: {e}") from None
+    rows = doc.get("verdicts", []) if isinstance(doc, dict) else doc
+    names = {n for r in advisory.records for n in _names(r)}
+    eco_names = {
+        advisory.osv_ecosystem.lower(),
+        *(k for k, v in OSV_ECOSYSTEM.items() if v == advisory.osv_ecosystem),
+    }
+    module = normalize(advisory.osv_ecosystem, advisory.module)
+
+    def applicable(version: str) -> bool:
+        for row in rows if isinstance(rows, list) else []:
+            c = (row or {}).get("candidate") or {}
+            ids = {str(x).upper() for x in [c.get("advisory_id"), *(c.get("aliases") or [])] if x}
+            if (
+                row.get("verdict") == "applicable"
+                and str(c.get("ecosystem", "")).lower() in eco_names
+                and normalize(advisory.osv_ecosystem, str(c.get("package", ""))) == module
+                and str(c.get("version")) == version
+                and ids & names
+            ):
+                return True
+        return False
+
+    missing = [v for v in versions if not applicable(v)]
+    if missing:
+        raise AdvisoryUnavailable(
+            f"{verdicts_file} holds no applicable verdict for {advisory.module} "
+            f"{', '.join(missing)} under {advisory.records[0].get('id')}"
+        )
+    return replace(
+        advisory,
+        verified=tuple(dict.fromkeys(versions)),
+        sources=(*advisory.sources, path.as_uri()),
+    )
 
 
 def _names(record: dict) -> set[str]:
