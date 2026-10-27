@@ -412,6 +412,61 @@ class TestCrossValidation(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestImpactAnalysisArtifact(unittest.TestCase):
+    """A portfolio-wide impact artifact names each repo in repos[].repo and
+    has no single metadata.repository to anchor a fingerprint."""
+
+    def test_portfolio_artifact_needs_no_metadata_repository(self):
+        doc = {
+            "metadata": {
+                "cve": "GHSA-aaaa-bbbb-cccc",
+                "module": "brotli",
+                "ecosystem": "pypi",
+                "vulnerable_range": ">=1.0.3 <1.2.1",
+                "fixed_version": "1.2.1",
+                "harness_version": "0.44.2",
+                "generated_at": "2026-10-27T00:00:00Z",
+                "tiers_executed": ["L1", "L4"],
+                "options": {"govulncheck": False, "binary_scan": False, "sweep": False},
+                "vulnerable_symbols": [],
+                "vulnerable_packages": ["brotli"],
+                "advisory_sources": [],
+            },
+            "summary": {
+                "repos_in_blast_radius": 1,
+                "version_in_range": 1,
+                "affected": 0,
+                "likely_affected": 1,
+                "not_observed": 0,
+                "version_not_in_range": 0,
+                "not_imported": 0,
+                "inconclusive": 0,
+                "product_surfaces": [],
+            },
+            "repos": [
+                {
+                    "repo": "repo:github.com/example/service",
+                    "products": [],
+                    "classification": "likely_affected",
+                    "version": "1.1.0",
+                    "direct": True,
+                    "evidence": {
+                        "l1_depends_on": True,
+                        "l1_version_in_range": True,
+                        "manifest_scan": "module_pinned_in_range",
+                    },
+                }
+            ],
+        }
+        schema = json.loads((validate.SCHEMA_DIR / "impact-analysis.schema.json").read_text())
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "ghsa-aaaa-bbbb-cccc-impact-analysis.json"
+            path.write_text(json.dumps(doc))
+            r = validate_report(str(path), schema)
+        self.assertFalse([e for e in r.errors if "metadata.repository" in e], r.errors)
+        self.assertTrue(r.passed, r.errors)
+
+
 class TestDirectoryValidation(unittest.TestCase):
     def test_directory_mode_finds_nested_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:

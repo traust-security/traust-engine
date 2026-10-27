@@ -1937,6 +1937,10 @@ def validate_report(
         "refuted-register",
         "operator-priv-profile",
         "adapter-result",
+        # Portfolio-wide: one artifact covers every repo in the blast
+        # radius, each named in `repos[].repo`; it has no findings and no
+        # cross-scan fingerprint to anchor.
+        "impact-analysis",
     )
     # These checks read findings and metadata directly. On a document that
     # is not report-shaped they would raise and abort a whole directory

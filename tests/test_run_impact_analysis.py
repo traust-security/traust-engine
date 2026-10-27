@@ -156,6 +156,37 @@ class TestClassify(unittest.TestCase):
         ev = RepoEvidence()
         self.assertEqual(classify(ev), "inconclusive")
 
+    def test_manifest_ecosystem_missing_import_does_not_demote(self):
+        # PyPI: urllib3/aiohttp load an installed brotli with no
+        # first-party import, so L4 "not imported" is not absence.
+        ev = RepoEvidence(l1_version_in_range=True, l4_package_imported=False)
+        self.assertEqual(classify(ev, "pypi"), "inconclusive")
+        self.assertEqual(classify(ev), "not_observed")  # Go keeps the tier
+
+    def test_manifest_ecosystem_pin_decides_despite_missing_import(self):
+        ev = RepoEvidence(
+            l1_version_in_range=True,
+            l4_package_imported=False,
+            manifest_scan="module_pinned_in_range",
+        )
+        self.assertEqual(classify(ev, "pypi"), "likely_affected")
+
+    def test_manifest_ecosystem_import_defers_to_fresher_pin(self):
+        ev = RepoEvidence(
+            l1_version_in_range=True,
+            l4_package_imported=True,
+            manifest_scan="module_pinned_out_of_range",
+        )
+        self.assertEqual(classify(ev, "npm"), "version_not_in_range")
+
+    def test_manifest_ecosystem_import_counts_as_source_import(self):
+        ev = RepoEvidence(
+            l1_version_in_range=True,
+            l4_package_imported=True,
+            manifest_scan="module_not_in_manifests",
+        )
+        self.assertEqual(classify(ev, "pypi"), "likely_affected")
+
 
 class TestRepoEvidence(unittest.TestCase):
     def test_to_dict_omits_none(self):
