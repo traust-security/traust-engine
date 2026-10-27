@@ -2,6 +2,16 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.40.0]
+
+- **TypeScript/JavaScript rule tranche (rule pack v1.11).** New rules for the
+  largest uncovered TS/JS clusters in the confirmed-finding ledger: XSS
+  (`dangerouslySetInnerHTML`, DOM HTML sinks, `rehype-raw` without
+  sanitizing, reflected Express responses), path traversal (request values to
+  fs paths, `sendFile`, `download`) and open redirect (server redirects and
+  client navigation from address-bar values); SSRF gains http(s).request,
+  the remaining axios methods, got, superagent, needle and undici sinks.
+
 ## [0.39.3]
 
 - Preserve supplied finding remediation effort and independent external

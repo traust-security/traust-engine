@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "traust-engine"
-version = "0.39.3"
+version = "0.40.0"
 license = "Apache-2.0"
 description = "Continuous-ops service for the AI security harness, on traust-core"
 requires-python = ">=3.11"
