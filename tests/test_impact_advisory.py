@@ -143,3 +143,52 @@ def test_the_artifact_records_the_fetched_range_and_sources(tmp_path):
     verdicts = {r["repo"]: r["classification"] for r in doc["repos"]}
     assert verdicts["repo:github.com/o/old"] == "version_not_in_range"
     assert verdicts["repo:github.com/o/hit"] != "version_not_in_range"
+
+
+def _verdicts(tmp_path, *rows):
+    path = tmp_path / "verdicts.json"
+    path.write_text(json.dumps({"verdicts": list(rows)}))
+    return str(path)
+
+
+def _row(version, verdict="applicable", package="brotli", advisory="CVE-2026-0001"):
+    return {
+        "case": f"{package}@{version}--{advisory}",
+        "candidate": {
+            "ecosystem": "PyPI",
+            "package": package,
+            "version": version,
+            "advisory_id": advisory,
+            "aliases": [],
+        },
+        "verdict": verdict,
+    }
+
+
+def test_a_verified_version_counts_with_its_verdicts_file_recorded(tmp_path):
+    from traust_engine.impact.advisory import with_verified
+
+    base = resolve("GHSA-aaaa-bbbb-cccc", "brotli", "pypi", client=FakeOsv([GHSA]))
+    verdicts = _verdicts(tmp_path, _row("1.0.2"))
+    a = with_verified(base, ["1.0.2"], verdicts)
+    assert base.in_range("1.0.2") is False
+    assert a.in_range("1.0.2") is True and a.in_range("1.0.1") is False
+    assert a.vulnerable_range == ">=1.0.3 <1.2.1 || =1.0.2 (verified)"
+    assert a.sources[-1] == Path(verdicts).resolve().as_uri()
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _row("1.0.2", verdict="undetermined"),
+        _row("1.0.1"),
+        _row("1.0.2", package="requests"),
+        _row("1.0.2", advisory="CVE-2099-9999"),
+    ],
+)
+def test_a_version_without_an_applicable_verdict_is_refused(tmp_path, row):
+    from traust_engine.impact.advisory import with_verified
+
+    base = resolve("GHSA-aaaa-bbbb-cccc", "brotli", "pypi", client=FakeOsv([GHSA]))
+    with pytest.raises(AdvisoryUnavailable, match="no applicable verdict"):
+        with_verified(base, ["1.0.2"], _verdicts(tmp_path, row))

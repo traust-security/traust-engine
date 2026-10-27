@@ -51,6 +51,8 @@ class ImpactOps(ContextOps):
         ecosystem: str = "go",
         osv_url: str | None = None,
         advisory_file: str | None = None,
+        verified_versions: tuple[str, ...] = (),
+        verified_by: str | None = None,
         symbols: str = "",
         packages: str = "",
         feature_desc: str | None = None,
@@ -63,17 +65,23 @@ class ImpactOps(ContextOps):
 
         The range and fixed version come from the advisory's OSV record, fetched
         from ``osv_url`` (the deployment's feeds) or read from ``advisory_file``
-        when the API is unreachable; a caller never supplies them."""
+        when the API is unreachable; a caller never supplies them. The one exception is
+        ``verified_versions``: versions below-range review verified affected, each backed
+        by an `applicable` verdict in ``verified_by``."""
         import sys
 
-        from traust_engine.impact.advisory import AdvisoryUnavailable, resolve
+        from traust_engine.impact.advisory import AdvisoryUnavailable, resolve, with_verified
         from traust_engine.impact.analyzer import ImpactParams, _execute, valid_advisory_id
 
         if not valid_advisory_id(cve):
             print(f"ERROR: '{cve}' is not a valid advisory ID", file=sys.stderr)
             return 2
         try:
+            if bool(verified_versions) != bool(verified_by):
+                raise AdvisoryUnavailable("verified versions and their verdicts file go together")
             advisory = resolve(cve, module, ecosystem, osv_url=osv_url, advisory_file=advisory_file)
+            if verified_versions:
+                advisory = with_verified(advisory, verified_versions, verified_by)
         except AdvisoryUnavailable as e:
             print(f"ERROR: {cve} not assessed: {e}", file=sys.stderr)
             return 2
