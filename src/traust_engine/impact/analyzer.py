@@ -1097,7 +1097,17 @@ def analyzer_for_ecosystem(ecosystem: str) -> LanguageAnalyzer:
 # --------------------------------------------------------------- classify
 
 
-def classify(evidence: RepoEvidence) -> str:
+def classify(evidence: RepoEvidence, ecosystem: str = "go") -> str:
+    """Classify one repo from its accumulated evidence.
+
+    The L4 package-import tier is Go-only evidence of absence: an
+    unimported Go package is not compiled into the binary. In a manifest
+    ecosystem (PyPI, npm, ...) an installed dependency is loaded by other
+    libraries without a first-party import (urllib3 decodes `br` through
+    whatever `brotli` is installed), so there a missing import never
+    demotes, and an observed import counts as source-import evidence.
+    """
+    go_import_tier = ecosystem == "go"
     if evidence.l1_version_in_range is False:
         return "version_not_in_range"
     if evidence.govulncheck == "symbol_reachable":
@@ -1122,7 +1132,7 @@ def classify(evidence: RepoEvidence) -> str:
         return "not_observed"
     if evidence.binary_string_scan == "package_path_absent":
         return "not_observed"
-    if evidence.l4_package_imported is False:
+    if go_import_tier and evidence.l4_package_imported is False:
         return "not_observed"
 
     if (
@@ -1131,7 +1141,7 @@ def classify(evidence: RepoEvidence) -> str:
     ):
         return "likely_affected"
 
-    if evidence.l4_package_imported is True:
+    if go_import_tier and evidence.l4_package_imported is True:
         if evidence.govulncheck is None and evidence.feature_pattern_matches is None:
             return "likely_affected"
         return "not_observed"
@@ -1147,17 +1157,14 @@ def classify(evidence: RepoEvidence) -> str:
         return "likely_affected"
     if evidence.binary_linked_library == "linked":
         return "likely_affected"
-    if (
-        evidence.manifest_scan == "module_not_in_manifests"
-        and evidence.source_import_scan != "imports_found"
-    ):
+    imported = evidence.source_import_scan == "imports_found" or (
+        not go_import_tier and evidence.l4_package_imported is True
+    )
+    if evidence.manifest_scan == "module_not_in_manifests" and not imported:
         return "not_observed"
-    if (
-        evidence.binary_linked_library == "not_linked"
-        and evidence.source_import_scan != "imports_found"
-    ):
+    if evidence.binary_linked_library == "not_linked" and not imported:
         return "not_observed"
-    if evidence.source_import_scan == "imports_found":
+    if imported:
         return "likely_affected"
 
     return "inconclusive"
@@ -1419,7 +1426,7 @@ def analyze_repo(
 
         return {
             "evidence": evidence,
-            "classification": classify(evidence),
+            "classification": classify(evidence, ctx.ecosystem),
             "tiers_run": tiers_run,
         }
     finally:
@@ -1524,7 +1531,7 @@ def _execute(params: ImpactParams, db_path: Path, results_loc: str | None = None
         elif has_l4_data:
             ev.l4_package_imported = False
 
-        classification = classify(ev)
+        classification = classify(ev, params.ecosystem)
         products = query_products(con, repo_id)
         repo_url = repo_url_from_id(repo_id)
 

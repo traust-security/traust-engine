@@ -2,6 +2,26 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.44.2]
+
+- **Fixed: impact analysis called installed PyPI/npm dependencies
+  `not_observed` without scanning them.**
+  - **The problem:** a repo whose code never imports the vulnerable package
+    (L4) was classified `not_observed` and skipped by the deep scan, in
+    every ecosystem. That holds for Go, where an unimported package is not
+    compiled in. In a manifest ecosystem an installed dependency is loaded
+    by other libraries: urllib3 and geventhttpclient decode `br` through
+    whatever `brotli` is installed. GHSA-9v8h-qqgm-4m35 (Brotli decoder
+    out-of-bounds write) came back `not_observed` for three repos pinning
+    brotli 1.0.9 to 1.2.0.
+  - **The fix:** `classify()` takes the ecosystem. A missing import demotes
+    only in Go. Elsewhere the repo goes on to the manifest scan, and an
+    observed import counts as source-import evidence.
+- **Fixed: every impact-analysis artifact failed validation** with
+  "metadata.repository is absent". The artifact is portfolio-wide, names
+  each repo in `repos[].repo` and has no findings to fingerprint, so the
+  repository check no longer applies to it.
+
 ## [0.44.1]
 
 - **NuGet lookups no longer miss advisories over casing.** OSV matches
