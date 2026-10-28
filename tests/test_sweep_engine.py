@@ -224,6 +224,47 @@ class TestCollect(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.results, self.phase0, self.sweeps = make_fixtures(self.tmp)
 
+    def test_confirmed_weaknesses_do_not_become_exploitable_rule_mining_seeds(self):
+        base = {
+            "source": "example-delta.json#0",
+            "title": "Security claim",
+            "cwe": "CWE-532",
+            "file": "collector/filter.py",
+            "claimed_severity": "high",
+        }
+        write_json(
+            self.phase0 / "fast-track-criticals-triage.json",
+            {
+                "findings": [
+                    {**base, "id": "unknown-kind", "verdict": "true_positive"},
+                    {
+                        **base,
+                        "id": "vulnerability",
+                        "verdict": "true_positive",
+                        "kind": "vulnerability",
+                    },
+                    {
+                        **base,
+                        "id": "weakness",
+                        "verdict": "true_positive",
+                        "kind": "weakness",
+                        "severity": None,
+                        "exclusion_rule": "13",
+                    },
+                    {**base, "id": "historical-weakness", "verdict": "hardening"},
+                ]
+            },
+        )
+        findings = SE.collect_fast_track(self.phase0)
+        self.assertEqual(
+            {
+                f["finding_id"]
+                for f in findings
+                if f["artifact"] == "fast-track-criticals-triage.json"
+            },
+            {"unknown-kind", "vulnerability"},
+        )
+
     def test_collect_classifies_all_sources(self):
         res = SE.do_collect(self.results, self.phase0, self.sweeps)
         self.assertFalse(res["skipped"])

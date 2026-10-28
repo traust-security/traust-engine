@@ -2043,7 +2043,7 @@ dependencies = [
 
 [[package]]
 name = "traust-engine"
-version = "0.39.4"
+version = "0.39.5"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },

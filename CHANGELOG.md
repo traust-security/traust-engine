@@ -2,6 +2,13 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.39.5]
+
+- Keep triage-confirmed defense-in-depth weaknesses out of the fast-track
+  vulnerability rule-mining seeds. Explicit vulnerability and omitted-kind
+  true positives retain their existing eligibility; historical verdicts remain
+  readable.
+
 ## [0.39.4]
 
 - Leave benchmark worklist validity unanswered instead of emitting the deprecated

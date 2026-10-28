@@ -283,7 +283,7 @@ def collect_fast_track(phase0: Path) -> list[dict]:
             continue
         if isinstance(doc, dict) and isinstance(doc.get("findings"), list):
             for f in doc["findings"]:
-                if f.get("verdict") != "true_positive":
+                if f.get("verdict") != "true_positive" or f.get("kind") == "weakness":
                     continue
                 m = _SOURCE_SLUG_RE.search(str(f.get("source", "")).rsplit("/", 1)[-1])
                 out.append(
