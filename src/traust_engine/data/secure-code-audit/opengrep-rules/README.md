@@ -197,3 +197,12 @@ finding present in them. Precision is unmeasured until the facts are judged
 (`/mine-ledger`). Not covered:
 `javascript:` URLs bound to `href`, markdown-to-jsx and marked renderer
 overrides, and sanitize-then-transform pipelines; these stay with review.
+
+v1.12 (2026-10-28): **TS/JS sources and one sanitizer, from review.** The
+reflected-XSS, open-redirect and SSRF taint rules also take destructured
+request fields (`const { x } = req.query`), request headers (`Referer`,
+`Host`, any `req.get(...)`), and `req.url` / `req.path` as sources.
+`JSON.stringify` is no longer an XSS sanitizer: it leaves `<` and `>` as they
+are, and Express sends a string body as HTML, so `res.send(JSON.stringify(x))`
+of request data is a sink. On the same eight checkouts this adds 5 hits and
+loses none. Flows through helper functions are still not followed.

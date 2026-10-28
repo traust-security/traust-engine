@@ -31,6 +31,24 @@ rules:
           - pattern: $REQ.params.$P
           - pattern: $REQ.body.$P
           - pattern: $REQ.query[$K]
+          - patterns:
+              - pattern-inside: "const {...} = $REQ.$PART;"
+              - pattern: $V
+              - metavariable-regex:
+                  metavariable: $PART
+                  regex: ^(query|params|body)$
+          - patterns:
+              - pattern-either:
+                  - pattern: $R.headers.$H
+                  - pattern: $R.headers[$H]
+                  - pattern: $R.get($H)
+                  - pattern: $R.header($H)
+                  - pattern: $R.url
+                  - pattern: $R.originalUrl
+                  - pattern: $R.path
+              - metavariable-regex:
+                  metavariable: $R
+                  regex: ^(req|request)$
     pattern-sinks:
       - patterns:
           - pattern-either:

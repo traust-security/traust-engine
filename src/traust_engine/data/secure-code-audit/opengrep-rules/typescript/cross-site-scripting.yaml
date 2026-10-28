@@ -150,16 +150,35 @@ rules:
           - pattern: $REQ.body.$P
           - pattern: $REQ.query[$K]
           - pattern: $REQ.params[$K]
+          - patterns:
+              - pattern-inside: "const {...} = $REQ.$PART;"
+              - pattern: $V
+              - metavariable-regex:
+                  metavariable: $PART
+                  regex: ^(query|params|body)$
+          - patterns:
+              - pattern-either:
+                  - pattern: $R.headers.$H
+                  - pattern: $R.headers[$H]
+                  - pattern: $R.get($H)
+                  - pattern: $R.header($H)
+                  - pattern: $R.url
+                  - pattern: $R.originalUrl
+                  - pattern: $R.path
+              - metavariable-regex:
+                  metavariable: $R
+                  regex: ^(req|request)$
+    # JSON.stringify is not one: it leaves `<` and `>` as they are, and res.send(string) is HTML
     pattern-sanitizers:
       - pattern-either:
           - pattern: escapeHtml(...)
           - pattern: $X.escape(...)
           - pattern: encodeURIComponent(...)
-          - pattern: JSON.stringify(...)
     pattern-sinks:
       - patterns:
           - pattern-either:
               - pattern: $RES.send(`...`)
+              - pattern: $RES.send(JSON.stringify(...))
               - pattern: $RES.send("..." + $X)
               - pattern: $RES.send($X + "...")
               - pattern: $RES.status($C).send(`...`)
