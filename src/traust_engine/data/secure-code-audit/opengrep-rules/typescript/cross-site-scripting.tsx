@@ -80,3 +80,11 @@ export function bundle(req: any, res: any): void {
   // ok: traust-ts-xss-reflected-response-taint
   res.json({ error: `Bundle ${sha} not found` });
 }
+
+export function viewer(req: any, res: any): void {
+  const { namespace } = req.query;
+  // ruleid: traust-ts-xss-reflected-response-taint
+  res.status(403).send(`User is not allowed in namespace ${namespace}`);
+  // ruleid: traust-ts-xss-reflected-response-taint
+  res.send(JSON.stringify({ echo: req.body.spec }));
+}

@@ -7,6 +7,9 @@ export function callback(req: any, res: any): void {
   res.redirect("/login");
   // ruleid: traust-ts-open-redirect-response-taint
   res.setHeader("Location", req.query.next);
+  const { returnTo } = req.body;
+  // ruleid: traust-ts-open-redirect-response-taint
+  res.redirect(returnTo);
 }
 
 export function afterLogin(): void {

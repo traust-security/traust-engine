@@ -20,3 +20,12 @@ export async function proxy(req: any, res: any): Promise<void> {
   // ruleid: traust-ts-ssrf-request-taint
   await axios.request({ url: req.body.target });
 }
+
+export async function forward(req: any): Promise<void> {
+  const origin = new URL(req.headers.referer).origin;
+  // ruleid: traust-ts-ssrf-request-taint
+  await fetch(`${origin}${req.path}`);
+  const { host } = req.query;
+  // ruleid: traust-ts-ssrf-request-taint
+  await axios.get(`https://${host}/healthz`);
+}
