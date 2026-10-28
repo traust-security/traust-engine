@@ -192,10 +192,8 @@ findings' evidence. Test, spec, mock and mock-backend files are excluded.
 - **SSRF (`typescript/ssrf.yaml`).** More outbound sinks: `http(s).request`,
   the remaining axios methods, got, superagent, needle and undici.
 
-Measured on eight checkouts (console, backstage, mlflow, keycloak, syndesis,
-data-science-pipelines, argo-workflows, feast): 35 hits, including all three
-confirmed TS/JS findings present in those checkouts (console `LogsPage.tsx`,
-`SharedResourceWarning.js`, `backend/src/routes/serve.ts`). Precision is
-unmeasured until the facts are judged (`/mine-ledger`). Not covered:
+Measured on eight checkouts: 35 hits, including every confirmed TS/JS
+finding present in them. Precision is unmeasured until the facts are judged
+(`/mine-ledger`). Not covered:
 `javascript:` URLs bound to `href`, markdown-to-jsx and marked renderer
 overrides, and sanitize-then-transform pipelines; these stay with review.
