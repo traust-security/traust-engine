@@ -161,3 +161,41 @@ bound text, so a "contains" test needs a leading `.*` (`(?is).*\blike\b`),
 and it cannot sit directly under `pattern-either` — wrap each branch in
 its own `patterns:`.
 
+
+v1.11 (2026-10-27): **TypeScript/JavaScript tranche, from the ledger.** The
+rule-mining report's largest uncovered TS/JS clusters were XSS (CWE-79, 37
+confirmed findings in about 30 repositories), path traversal (CWE-22, 10)
+and open redirect (CWE-601, 4); each rule is written from the cited
+findings' evidence. Test, spec, mock and mock-backend files are excluded.
+- **XSS (`typescript/cross-site-scripting.yaml`).**
+  - `xss-dangerously-set-inner-html`: a computed `__html` value with no
+    sanitizer. Translation strings (`t(...)`, `i18n*`) and values named as
+    sanitized are not matched.
+  - `xss-dom-html-sink`: `innerHTML`/`outerHTML` assignment,
+    `insertAdjacentHTML`, `document.write` (also on an opened window) and
+    jQuery `.html()` with a computed, unsanitized value.
+  - `xss-markdown-raw-html` (WARNING): `rehype-raw` without a later
+    `rehype-sanitize`.
+  - `xss-reflected-response-taint`: a request value in an Express
+    `send`/`write`/`end` string body (sent as text/html).
+- **Path traversal (`typescript/path-traversal.yaml`).**
+  `path-traversal-fs-taint`: a request value (query, params, body, a
+  destructured body field, or `req.url`/`req.path`) reaching the path
+  argument of an fs read, write, stream or remove, or `res.sendFile` /
+  `res.download`; `path.basename` and filename sanitizers clear it.
+- **Open redirect (`typescript/open-redirect.yaml`).**
+  `open-redirect-response-taint`: a request value as the target of
+  `res.redirect` or a `Location` header. `open-redirect-client-navigation`
+  (WARNING): an address-bar value (`URLSearchParams.get`, `location.search`,
+  `location.hash`) as the URL of `location.assign/replace/href` or
+  `window.open`.
+- **SSRF (`typescript/ssrf.yaml`).** More outbound sinks: `http(s).request`,
+  the remaining axios methods, got, superagent, needle and undici.
+
+Measured on eight checkouts (console, backstage, mlflow, keycloak, syndesis,
+data-science-pipelines, argo-workflows, feast): 35 hits, including all three
+confirmed TS/JS findings present in those checkouts (console `LogsPage.tsx`,
+`SharedResourceWarning.js`, `backend/src/routes/serve.ts`). Precision is
+unmeasured until the facts are judged (`/mine-ledger`). Not covered:
+`javascript:` URLs bound to `href`, markdown-to-jsx and marked renderer
+overrides, and sanitize-then-transform pipelines; these stay with review.
