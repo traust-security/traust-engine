@@ -72,3 +72,13 @@ func ownedItems(ctx context.Context, db *sql.DB, ownerName string) {
 }
 
 func escapeLike(s string) string { return s }
+
+func preview(w http.ResponseWriter, r *http.Request) {
+	body := r.FormValue("template")
+	// ruleid: traust-go-injection-template-parse-taint
+	t, _ := template.New("preview").Parse(body)
+	// ok: traust-go-injection-template-parse-taint
+	fixed, _ := template.New("page").Parse("<p>{{.Name}}</p>")
+	_ = t
+	_ = fixed
+}

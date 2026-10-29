@@ -100,3 +100,39 @@ rules:
           - pattern: new ProcessBuilder("sh", "-c", "..." + $X)
           - pattern: new ProcessBuilder("bash", "-c", "..." + $X)
           - pattern: new ProcessBuilder("cmd", "/c", "..." + $X)
+
+  - id: traust-java-injection-expression-language
+    languages: [java]
+    severity: ERROR
+    message: >-
+      A non-literal string is evaluated as an expression or script (Spring
+      SpEL parseExpression, Jakarta EL, OGNL, MVEL, a javax.script
+      ScriptEngine) — whoever controls the text can call methods, read
+      beans and run code. Evaluate only expressions shipped with the code;
+      pass user values as variables in a SimpleEvaluationContext. CWE-917 /
+      CWE-94.
+    metadata:
+      cwe: ["CWE-917", "CWE-94"]
+      category: injection
+      asvs: ["V1"]
+      confidence: MEDIUM
+      references:
+        - "CWE-917 expression language injection — SpEL, EL, OGNL, MVEL and script engines on dynamic text"
+    patterns:
+      - pattern-either:
+          - pattern: $PARSER.parseExpression($X, ...)
+          - pattern: $ELP.eval($X)
+          - pattern: $FACTORY.createValueExpression($CTX, $X, ...)
+          - pattern: $FACTORY.createMethodExpression($CTX, $X, ...)
+          - pattern: Ognl.getValue($X, ...)
+          - pattern: Ognl.parseExpression($X)
+          - pattern: MVEL.eval($X, ...)
+          - pattern: MVEL.compileExpression($X, ...)
+          - pattern: $ENGINE.eval($X, ...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: '"..."'
+      - pattern-not-inside: |
+          $T $C = "...";
+          ...

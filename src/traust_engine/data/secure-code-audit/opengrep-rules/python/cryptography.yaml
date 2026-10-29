@@ -135,3 +135,54 @@ rules:
                     - pattern-not-regex: '(?i)^(?:[\w.]+\.)?\w*(?:type|kind|status|state|mode|algorithm|algo|alg|version|format)$'
                     - pattern-not-regex: '(?i)^(?:[\w.]+\.)?err\w*$'
                     - pattern-not-regex: '^(?:[\w.]+\.)?[A-Z][A-Z0-9_]*$'
+
+  - id: traust-python-cryptography-weak-hash
+    languages: [python]
+    severity: INFO
+    message: >-
+      MD5/SHA-1 in use — fine for non-security checksums, broken for
+      anything an attacker benefits from colliding (signatures, password
+      hashes, integrity of untrusted input). Judge the context; hash
+      passwords with a password KDF (argon2, bcrypt, scrypt). CWE-328.
+    metadata:
+      cwe: ["CWE-328", "CWE-327"]
+      category: cryptography
+      asvs: ["V11"]
+      confidence: LOW
+      references:
+        - "CWE-328/CWE-327 — weak hash algorithms in security context"
+    patterns:
+      - pattern-either:
+          - pattern: hashlib.md5(...)
+          - pattern: hashlib.sha1(...)
+          - pattern: hashlib.new("md5", ...)
+          - pattern: hashlib.new("sha1", ...)
+      - pattern-not: hashlib.md5(..., usedforsecurity=False, ...)
+      - pattern-not: hashlib.sha1(..., usedforsecurity=False, ...)
+
+  - id: traust-python-cryptography-weak-random-secret
+    languages: [python]
+    severity: WARNING
+    message: >-
+      The random module's output assigned to a secret-looking variable —
+      random is a seedable Mersenne Twister, so generated tokens, codes and
+      passwords are predictable. Use the secrets module
+      (secrets.token_urlsafe, secrets.choice). CWE-338.
+    metadata:
+      cwe: ["CWE-338"]
+      category: cryptography
+      asvs: ["V11"]
+      confidence: MEDIUM
+      references:
+        - "CWE-338 — random module used for secret-shaped values"
+    patterns:
+      - pattern-either:
+          - pattern: $X = random.$F(...)
+          - pattern: $X = "...".join(random.$F(...))
+          - pattern: $X = "".join(random.$F(...) for $I in $R)
+      - metavariable-regex:
+          metavariable: $F
+          regex: ^(random|randint|randrange|choice|choices|sample|getrandbits)$
+      - metavariable-regex:
+          metavariable: $X
+          regex: (?i).*(token|secret|password|passwd|nonce|otp|apikey|api_key|sessionid|session_id|reset_code|verification_code).*

@@ -124,3 +124,30 @@ rules:
           - pattern-inside: |
               class $C(..., Unpickler, ...):
                   ...
+
+  - id: traust-python-input-validation-xxe-parser
+    languages: [python]
+    severity: ERROR
+    message: >-
+      An XML parser configured to resolve external entities or fetch from
+      the network (lxml XMLParser(resolve_entities=True) or
+      no_network=False; a SAX parser with feature_external_ges /
+      feature_external_pes on) — untrusted XML can read local files and
+      reach internal hosts. Leave entity resolution off, or parse untrusted
+      input with defusedxml. CWE-611.
+    metadata:
+      cwe: ["CWE-611"]
+      category: input-validation
+      asvs: ["V1"]
+      confidence: HIGH
+      references:
+        - "CWE-611 XXE — Python XML parsers with external entity resolution on"
+    pattern-either:
+      - pattern: $ET.XMLParser(..., resolve_entities=True, ...)
+      - pattern: $ET.XMLParser(..., no_network=False, ...)
+      - pattern: XMLParser(..., resolve_entities=True, ...)
+      - pattern: XMLParser(..., no_network=False, ...)
+      - pattern: $P.setFeature(feature_external_ges, True)
+      - pattern: $P.setFeature(feature_external_pes, True)
+      - pattern: $P.setFeature(xml.sax.handler.feature_external_ges, True)
+      - pattern: $P.setFeature(xml.sax.handler.feature_external_pes, True)
