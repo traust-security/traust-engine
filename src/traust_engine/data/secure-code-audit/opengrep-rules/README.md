@@ -252,3 +252,64 @@ Measured on public sample projects (Spring, Rails, FastAPI, axum, tonic):
 
 Precision is unmeasured until the facts are judged (`/mine-ledger`).
 
+v1.15 (2026-10-29): **well-known classes across every application
+language.** These rules are for adopters' code, so each supported language
+covers the classic classes.
+- **Go:**
+  - `xss-reflected-response-taint`: request values written to the
+    ResponseWriter.
+  - `xss-template-trusted-type`: request values converted to
+    `template.HTML` and the other trusted types.
+  - `open-redirect-taint`: `http.Redirect`, `Location`, gin/echo.
+  - `injection-template-parse-taint`: request text parsed as a template.
+- **Python:**
+  - `open-redirect-taint`: Flask, Django and Starlette redirects.
+    Query-string building and `url_has_allowed_host_and_scheme` clear it.
+  - `input-validation-xxe-parser`: lxml `resolve_entities=True` /
+    `no_network=False`, SAX external entities.
+  - `cryptography-weak-hash` (INFO): MD5/SHA-1, judged in context.
+  - `cryptography-weak-random-secret`: `random` for secret-named values.
+- **TypeScript/JavaScript:**
+  - `input-validation-unsafe-deserialization`: node-serialize, js-yaml
+    full schema.
+  - `input-validation-xxe-noent`: libxmljs `noent: true`.
+  - `authentication-jwt-verification-weakened`: the `none` algorithm, or
+    `ignoreExpiration`.
+  - `cryptography-weak-hash` (INFO).
+  - `cryptography-weak-random-secret`: `Math.random`.
+  - `cryptography-weak-cipher`: ECB, DES, RC4, `createCipher`.
+- **Java:**
+  - taint rules from Spring/JAX-RS parameters and servlet requests:
+    `path-traversal-request-taint`, `ssrf-request-taint`,
+    `xss-servlet-writer-taint`, `open-redirect-taint`;
+  - `injection-expression-language`: SpEL, EL, OGNL, MVEL and script
+    engines on dynamic text;
+  - `authentication-jwt-unsigned-parse`: jjwt unsigned parse, auth0
+    decode-only claims.
+- **Ruby:**
+  - `path-traversal-params-taint`;
+  - `xss-html-safe`: params reaching `html_safe`, `raw` or
+    `render html:`;
+  - `injection-render-inline`;
+  - `open-redirect-params`;
+  - `authentication-jwt-verification-off`;
+  - `cryptography-tls-verify-none`;
+  - `cryptography-weak-hash` (INFO) and `cryptography-weak-random-secret`.
+- **Rust:**
+  - `ssrf-request-taint`: request values into reqwest;
+  - `cryptography-tls-verify-off`: `danger_accept_invalid_*`, rustls
+    custom verifiers;
+  - `cryptography-weak-hash` (INFO).
+
+Measured on twelve public projects (Go, Python, TypeScript, Java, Ruby,
+Rust; sample apps through large production codebases):
+- the injection, XSS, deserialization, XXE, JWT, TLS and SSRF rules fire
+  0 times;
+- the open-redirect rules fire twice, both explicitly allow-listed
+  redirects a reviewer can close;
+- the INFO weak-hash rules fire 14 times, mostly checksums.
+
+Two first drafts were too broad and were changed before release. A rule
+that flagged any non-literal `template.HTML(...)` or `.html_safe` fired 80
+times on server-built HTML. Those two rules now follow request data only.
+

@@ -112,3 +112,18 @@ class PlainLoader:
     # ok: traust-python-input-validation-restricted-unpickler-inventory
     def find_class(self, module, name):
         return None
+
+
+def parse_upload(data):
+    # ruleid: traust-python-input-validation-xxe-parser
+    parser = etree.XMLParser(resolve_entities=True)
+    # ruleid: traust-python-input-validation-xxe-parser
+    remote = etree.XMLParser(no_network=False, recover=True)
+    sax = xml.sax.make_parser()
+    # ruleid: traust-python-input-validation-xxe-parser
+    sax.setFeature(feature_external_ges, True)
+    # ok: traust-python-input-validation-xxe-parser
+    safe = etree.XMLParser(resolve_entities=False, no_network=True)
+    # ok: traust-python-input-validation-xxe-parser
+    sax.setFeature(feature_external_ges, False)
+    return etree.fromstring(data, parser)

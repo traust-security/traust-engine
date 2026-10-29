@@ -108,3 +108,25 @@ def check_credentials(record, supplied_token, supplied_password, expected_mac, r
 def test_round_trip(loaded, expected_signature):
     # ok: traust-python-cryptography-secret-compare-not-constant-time
     assert loaded.signature == expected_signature
+
+
+def make_reset():
+    # ruleid: traust-python-cryptography-weak-random-secret
+    reset_token = "".join(random.choices(ALPHABET, k=32))
+    # ruleid: traust-python-cryptography-weak-random-secret
+    otp = random.randint(100000, 999999)
+    # ok: traust-python-cryptography-weak-random-secret
+    reset_token = secrets.token_urlsafe(32)
+    # ok: traust-python-cryptography-weak-random-secret
+    jitter = random.random()
+    return reset_token
+
+
+def digest(blob, password):
+    # ruleid: traust-python-cryptography-weak-hash
+    stored = hashlib.md5(password.encode()).hexdigest()
+    # ok: traust-python-cryptography-weak-hash
+    etag = hashlib.md5(blob, usedforsecurity=False).hexdigest()
+    # ok: traust-python-cryptography-weak-hash
+    strong = hashlib.sha256(blob).hexdigest()
+    return stored, etag, strong

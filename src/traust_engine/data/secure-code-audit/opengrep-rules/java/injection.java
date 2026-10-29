@@ -66,4 +66,16 @@ class InjectionTests {
         // ok: traust-java-injection-exec-concat
         new ProcessBuilder("ping", "-c", "1", host);
     }
+
+    Object evaluate(String rule, ExpressionParser parser, ScriptEngine engine) throws Exception {
+        // ruleid: traust-java-injection-expression-language
+        Object a = parser.parseExpression(rule).getValue(context);
+        // ruleid: traust-java-injection-expression-language
+        Object b = engine.eval(rule);
+        // ruleid: traust-java-injection-expression-language
+        Object c = Ognl.getValue(rule, root);
+        // ok: traust-java-injection-expression-language
+        Object d = parser.parseExpression("price * quantity").getValue(context);
+        return a;
+    }
 }

@@ -114,3 +114,33 @@ rules:
                 - pattern: fmt.Sprintf("%s%%", $X)
                 - pattern: fmt.Sprintf("%%%s%%", $X)
           - pattern-not-regex: (?i)\bescape\b
+
+  - id: traust-go-injection-template-parse-taint
+    languages: [go]
+    severity: ERROR
+    message: >-
+      A request value is parsed as a Go template (template.New(...).Parse,
+      template.Must(...Parse(...))) — whoever writes the text controls the
+      template: data access through the context, calls to registered
+      functions, and with text/template no escaping at all. Parse only
+      templates shipped with the code; pass request values as data.
+      CWE-1336.
+    metadata:
+      cwe: ["CWE-1336", "CWE-94"]
+      category: injection
+      asvs: ["V1"]
+      confidence: HIGH
+      references:
+        - "CWE-1336 server-side template injection — request text parsed as a Go template"
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - pattern: $R.URL.Query().Get(...)
+          - pattern: $R.FormValue(...)
+          - pattern: $R.PostFormValue(...)
+          - pattern: $C.Query(...)
+          - pattern: $C.PostForm(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: $T.Parse($X)
+          - focus-metavariable: $X
