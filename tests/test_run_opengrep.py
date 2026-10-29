@@ -146,6 +146,17 @@ class TestRulesResolution(unittest.TestCase):
         self.assertEqual(resolved[0]["config"], [str(TRAUST_PACK / "go")])
         self.assertIn("no external restrictions", resolved[0]["license_note"])
 
+    def test_javascript_scans_with_the_typescript_rules(self):
+        for name in ("app.js", "app.jsx", "app.mjs", "app.cjs"):
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                (Path(d) / name).write_text("module.exports = {};\n")
+                (Path(d) / "ci.yaml").write_text("k: v\n")
+                resolved = R.resolve_rules([], Path(d))
+                self.assertEqual(
+                    resolved[0]["config"],
+                    [str(TRAUST_PACK / "typescript"), str(TRAUST_PACK / "yaml")],
+                )
+
     def test_fork_supplement_pin_constants(self):
         # The fork stays available as an internal-run supplement.
         self.assertIn("opengrep-rules", R.FORK_RULES_REPO)
@@ -220,6 +231,17 @@ class TestEndToEnd(unittest.TestCase):
 
 
 class TestCoverageBlock(unittest.TestCase):
+    def test_javascript_coverage_counts_the_typescript_rules(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "server.js").write_text("module.exports = {};\n")
+            cov = R.coverage_block(Path(d))
+            self.assertEqual(cov["detected_languages"], ["javascript"])
+            self.assertEqual(
+                cov["traust_rules_by_language"]["javascript"],
+                R.pack_rule_counts()["typescript"],
+            )
+            self.assertNotIn("javascript", cov["uncovered_languages"])
+
     def test_thin_and_uncovered_languages(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

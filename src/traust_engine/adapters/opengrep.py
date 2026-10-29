@@ -160,6 +160,8 @@ LANG_DIRS = {
     ".py": "python",
     ".js": "javascript",
     ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
     ".ts": "typescript",
     ".tsx": "typescript",
     ".java": "java",
@@ -183,6 +185,10 @@ LANG_DIRS = {
     ".html": "html",
     ".sol": "solidity",
 }
+
+
+# The traust pack keeps its JavaScript rules in typescript/ (each rule declares both languages).
+PACK_DIRS = {"javascript": "typescript"}
 
 
 def detect_language_dirs(target: Path) -> set[str]:
@@ -238,7 +244,7 @@ def coverage_block(target: Path, *, loc: Locations | None = None) -> dict:
     non_code = {"yaml", "html", "terraform"}
     detected = sorted(detect_language_dirs(target) - non_code)
     counts = pack_rule_counts(loc=loc)
-    per_lang = {lang: counts.get(lang, 0) for lang in detected}
+    per_lang = {lang: counts.get(PACK_DIRS.get(lang, lang), 0) for lang in detected}
     return {
         "detected_languages": detected,
         "traust_rules_by_language": per_lang,
@@ -261,8 +267,8 @@ def resolve_rules(
     resolved = []
     pack = resolve_rule_pack_dir(pack, loc)
     if not sources:
-        langs = detect_language_dirs(target)
-        lang_paths = [str(pack / d) for d in sorted(langs) if (pack / d).is_dir()]
+        dirs = {PACK_DIRS.get(lang, lang) for lang in detect_language_dirs(target)}
+        lang_paths = [str(pack / d) for d in sorted(dirs) if (pack / d).is_dir()]
         resolved.append(
             {
                 "source": "traust rule pack",
