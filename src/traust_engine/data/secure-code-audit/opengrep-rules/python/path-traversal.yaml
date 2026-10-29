@@ -57,3 +57,64 @@ rules:
           patterns:
             - pattern-not: $B + os.sep
             - pattern-not: os.path.join($B, "")
+
+  - id: traust-python-path-traversal-file-response-taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A request path value (a catch-all `{name:path}` route parameter, or
+      Starlette `request.path_params` / `query_params`) reaches a served or
+      opened file path — '../' segments read any file the process can.
+      Resolve the path and check it stays under the base directory
+      (Path.resolve() plus is_relative_to), or serve fixed names only.
+      CWE-22.
+    metadata:
+      cwe: ["CWE-22"]
+      category: path-traversal
+      asvs: ["V5"]
+      confidence: HIGH
+      references:
+        - "CWE-22 path traversal — catch-all route parameter served as a file (FastAPI / Starlette FileResponse)"
+    mode: taint
+    pattern-sources:
+      - pattern-either:
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      @$R.$VERB($ROUTE, ...)
+                      async def $F(..., $P: $T, ...): ...
+                  - pattern-inside: |
+                      @$R.$VERB($ROUTE, ...)
+                      def $F(..., $P: $T, ...): ...
+                  - pattern-inside: |
+                      @$R.$VERB($ROUTE, ...)
+                      async def $F(..., $P, ...): ...
+                  - pattern-inside: |
+                      @$R.$VERB($ROUTE, ...)
+                      def $F(..., $P, ...): ...
+              - metavariable-regex:
+                  metavariable: $ROUTE
+                  regex: .*\{\w+:path\}
+              - focus-metavariable: $P
+          - pattern: $REQ.path_params[...]
+          - pattern: $REQ.path_params.get(...)
+          - pattern: $REQ.query_params[...]
+          - pattern: $REQ.query_params.get(...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: os.path.basename(...)
+          - pattern: secure_filename(...)
+          - pattern: $P.name
+    pattern-sinks:
+      - pattern-either:
+          - pattern: FileResponse($P, ...)
+          - pattern: web.FileResponse($P, ...)
+          - pattern: open($P, ...)
+          - pattern: $P.read_bytes()
+          - pattern: $P.read_text(...)
+          - patterns:
+              - pattern-inside: |
+                  @$R.$VERB(..., response_class=FileResponse, ...)
+                  async def $F(...): ...
+              - pattern: return $P
+              - focus-metavariable: $P

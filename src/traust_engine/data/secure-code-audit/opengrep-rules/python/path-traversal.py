@@ -49,3 +49,44 @@ def contained(base, name):
     if os.path.abspath(p).startswith(os.path.join(base, "")):
         return p
     return None
+
+
+@router.get("/files/{path_name:path}")
+async def serve_file(path_name: str):
+    file_path = DATA_DIR / path_name
+    # ruleid: traust-python-path-traversal-file-response-taint
+    return FileResponse(file_path)
+
+
+@api.custom_route("/assets/{asset:path}", methods=["GET"])
+async def assets(request: Request) -> FileResponse:
+    target = ASSET_ROOT / request.path_params["asset"]
+    # ruleid: traust-python-path-traversal-file-response-taint
+    return FileResponse(target)
+
+
+@router.api_route("/pages/{page:path}", methods=["GET"], response_class=FileResponse)
+async def page(page: str):
+    found = PAGE_ROOT / f"{page}.md"
+    if found.exists():
+        # ruleid: traust-python-path-traversal-file-response-taint
+        return found
+
+
+@router.get("/docs/{name:path}")
+async def doc(name: str):
+    # ruleid: traust-python-path-traversal-file-response-taint
+    with open(os.path.join(DOCS, name)) as fh:
+        return fh.read()
+
+
+@router.get("/safe/{name:path}")
+async def safe(name: str):
+    # ok: traust-python-path-traversal-file-response-taint
+    return FileResponse(DATA_DIR / os.path.basename(name))
+
+
+@router.get("/report/{report_id}")
+async def report(report_id: str):
+    # ok: traust-python-path-traversal-file-response-taint
+    return FileResponse(REPORTS / "summary.pdf")

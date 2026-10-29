@@ -16,6 +16,8 @@ opengrep-rules/
   python/       # Python rules + .py fixtures
   java/         # Java rules + .java fixtures
   typescript/   # TypeScript/JavaScript rules + .ts fixtures
+  ruby/         # Ruby rules + .rb fixtures
+  rust/         # Rust rules + .rs fixtures
   bash/         # Shell rules + .sh fixtures
   yaml/         # YAML config-default rules + .test.yaml fixtures
 ```
@@ -206,3 +208,47 @@ request fields (`const { x } = req.query`), request headers (`Referer`,
 are, and Express sends a string body as HTML, so `res.send(JSON.stringify(x))`
 of request data is a sink. On the same eight checkouts this adds 5 hits and
 loses none. Flows through helper functions are still not followed.
+
+v1.13 (2026-10-29): **Java, Python, Ruby and Rust, from the ledger.** These
+close the Vercel comparison gap plan's recall follow-ups. Each rule is
+written from the cited confirmed findings' evidence. Classes with no
+confirmed findings (Rust and Ruby SQL, shell interpolation, disabled JWT
+verification) get no rule.
+- **Java SQL (`java/injection.yaml`).** `injection-sql-concat` now also
+  takes:
+  - SQL built with `String.format`, `format` or `.formatted`;
+  - query text held in a local variable before the call;
+  - JPQL and HQL (`createQuery`, `createSQLQuery`) and `JdbcTemplate`'s
+    `queryFor*` / `batchUpdate`.
+
+  A literal, or a value declared `int`/`Integer`/`long`/`Long`/`short`, is
+  not matched.
+- **Python path traversal (`python/path-traversal.yaml`).**
+  `path-traversal-file-response-taint`: a catch-all `{name:path}` route
+  parameter, or Starlette `request.path_params` / `query_params`, reaching
+  `FileResponse`, `open`, `read_bytes`/`read_text`, or returned from a
+  `response_class=FileResponse` route. `basename`, `secure_filename` and
+  `.name` clear it.
+- **Ruby (`ruby/`, new).**
+  - `deserialization-yaml-unsafe-load`: `YAML`/`Psych` `unsafe_load` and
+    `load` of non-literal data, unless `permitted_classes:` is passed.
+  - `deserialization-marshal-load` (WARNING).
+  - `injection-kernel-open`: `Kernel#open` / `URI.open` on a non-literal.
+    That covers command execution through `|` and SSRF; `File.open` is not
+    matched.
+  - `injection-erb-template` (WARNING): `ERB.new` on non-literal template
+    text, not read from a file.
+- **Rust (`rust/`, new).** `path-traversal-request-taint`: a gRPC message
+  field (`into_inner()`, or a `…Request` parameter) or an axum/actix `Path`
+  / `Query` extractor reaching `std::fs`, `tokio::fs`, `File::open` /
+  `create` or `NamedFile::open`; `file_name()` clears it.
+
+Measured on public sample projects (Spring, Rails, FastAPI, axum, tonic):
+- `injection-sql-concat` gives 9 hits in one Spring sample, each
+  concatenating an id held as a `String` or returned from `getId()`. These
+  aren't exploitable but match the shape.
+- `yaml-unsafe-load` gives 1 hit, on a maintenance script's local input.
+- Nothing else fires.
+
+Precision is unmeasured until the facts are judged (`/mine-ledger`).
+

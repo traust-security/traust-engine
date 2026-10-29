@@ -1,0 +1,53 @@
+rules:
+  - id: traust-ruby-injection-kernel-open
+    languages: [ruby]
+    severity: ERROR
+    message: >-
+      Kernel#open (or URI.open from open-uri) on a non-literal value — a
+      value starting with '|' runs a shell command, and a URL is fetched
+      from wherever it points (SSRF, local file read). Use File.open for
+      files, and an HTTP client with an allow-list of hosts for URLs.
+      CWE-78 / CWE-918.
+    metadata:
+      cwe: ["CWE-78", "CWE-918"]
+      category: injection
+      asvs: ["V1"]
+      confidence: HIGH
+      references:
+        - "CWE-78 / CWE-918 — Kernel#open and open-uri on caller- or tenant-controlled values"
+    patterns:
+      - pattern-either:
+          - pattern: open($X, ...)
+          - pattern: Kernel.open($X, ...)
+          - pattern: URI.open($X, ...)
+          - pattern: URI.parse($X).open(...)
+          - pattern: URI($X).open(...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: '"..."'
+
+  - id: traust-ruby-injection-erb-template
+    languages: [ruby]
+    severity: WARNING
+    message: >-
+      An ERB template built from non-literal text and rendered — whoever
+      controls the template text runs Ruby (<%= system(...) %>). Render
+      only templates shipped with the code; substitute untrusted values as
+      data, never as template source. CWE-94.
+    metadata:
+      cwe: ["CWE-94"]
+      category: injection
+      asvs: ["V1"]
+      confidence: MEDIUM
+      references:
+        - "CWE-94 code injection — ERB.new on imported or caller-supplied template text"
+    patterns:
+      - pattern-either:
+          - pattern: ERB.new($X, ...).result(...)
+          - pattern: ERB.new($X, ...).result_with_hash(...)
+      - metavariable-pattern:
+          metavariable: $X
+          patterns:
+            - pattern-not: '"..."'
+            - pattern-not: File.read(...)
