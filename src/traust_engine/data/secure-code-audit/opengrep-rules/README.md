@@ -333,3 +333,79 @@ Two first drafts were too broad and were changed before release. A rule
 that flagged any non-literal `template.HTML(...)` or `.html_safe` fired 80
 times on server-built HTML. Those two rules now follow request data only.
 
+
+v1.16 (2026-10-29): **cross-origin, CSRF, mass assignment and Spring Boot
+exposure.** Well-known classes the pack had no rule for, in every language
+with a low-noise shape.
+- **CORS, any origin with credentials (CWE-942), every language** (new
+  `<lang>/cors.yaml`): `cors-any-origin-with-credentials`.
+  - Java: a `"*"` origin pattern (`@CrossOrigin`, `CorsConfiguration`,
+    `CorsRegistry`) beside `allowCredentials(true)`, or the Origin header
+    echoed with credentials.
+  - Python: Starlette/FastAPI `CORSMiddleware` (`["*"]` or a match-all
+    regex), flask-cors with credentials and no origins (it echoes the
+    caller), django-cors-headers allow-all with credentials, aiohttp-cors.
+  - TypeScript/JavaScript: `origin: true`, a match-all regex or an
+    always-allow callback beside `credentials: true` (cors, Nest, Fastify),
+    or the Origin header echoed with credentials.
+  - Go: rs/cors `"*"` or an always-true origin func with credentials,
+    gin-contrib's always-true func, echo's unsafe wildcard option, or the
+    Origin header echoed.
+  - Ruby: rack-cors match-all regex or always-true block on a credentials
+    resource.
+  - Rust: tower-http `very_permissive` / `mirror_request`, actix-cors
+    `permissive` / `allow_any_origin` with credentials.
+- **CSRF (CWE-352)** (new `<lang>/csrf.yaml`):
+  - Java `csrf-disabled-with-session-login`: CSRF disabled in a filter
+    chain that also has form login, OAuth2 login or remember-me (a
+    stateless token chain is not matched).
+  - Python `csrf-protection-disabled`: `csrf_exempt`, Flask-WTF
+    `exempt` and `WTF_CSRF_ENABLED = False` outside test configuration.
+  - Ruby `csrf-protection-skipped` (INFO, LOW): skips and `except:`, outside
+    webhook, callback and API controllers; most skips are deliberate.
+- **Mass assignment (CWE-915)** (new `<lang>/mass-assignment.yaml`):
+  - Java `mass-assignment-request-body-entity`: a `@RequestBody` entity
+    saved or merged as received (types named like DTOs are excluded).
+  - Python: `extra-allow` (Pydantic models that keep undeclared fields,
+    settings excluded), `model-all-fields` (ModelForm/ModelSerializer
+    `fields = "__all__"`), `request-splat` (request data unpacked into
+    `objects.create/update`, or `setattr` over its items).
+  - TypeScript/JavaScript `mass-assignment-request-body`: the whole
+    request body into an ORM create/update, `Object.assign`, a spread, a
+    Prisma `data:` or a model constructor.
+  - Go `mass-assignment-bind-and-save`: a request body decoded into a
+    struct that is then `Create`d, `Save`d or `Updates`d.
+  - Ruby `mass-assignment-permit-all`: `permit!` or `to_unsafe_h` handed
+    to a model write or returned by a `*_params` method (`slice` first, or a
+    hash or keyword value, is not matched).
+- **Ownership (CWE-639), Ruby** (new `ruby/authorization.yaml`):
+  `authorization-unscoped-find-beside-scoped`: `Model.find(params[...])`
+  in a controller whose other actions scope lookups to the signed-in user,
+  unless the action authorizes (`authorize`, a guardian-style `ensure_*`,
+  an `admin?`/`staff?` check). Ownership with no in-code signal stays with
+  review.
+- **Spring Boot exposure** (`java/data-exposure.yaml`,
+  `yaml/data-exposure.yaml`):
+  - `actuator-permit-all` (CWE-200): every actuator endpoint permitted in
+    the filter chain;
+  - `actuator-web-exposure-all`: `management.endpoints.web.exposure.include`
+    of `*` or a sensitive endpoint, in `.properties` (a regex rule limited
+    to `*.properties`) and `application.yml`;
+  - `error-stacktrace-always` (CWE-209): `server.error.include-stacktrace`
+    set to `always`.
+
+Measured on seventeen public projects (sample apps through large
+production codebases, all six languages), 24 hits:
+- CORS (every language), Java CSRF, the Go and TypeScript mass-assignment
+  rules and Pydantic `extra="allow"`: 0;
+- Java request-body entities: 7, all in one generated CRUD sample that
+  saves request bodies as received;
+- Ruby CSRF skips (INFO): 10, deliberate ones a reviewer closes;
+- Python CSRF exemptions: 2, both GraphQL views;
+- the Ruby unscoped-lookup rule: 2; Ruby `permit!`/`to_unsafe_h`: 1;
+  actuator exposure: 2.
+
+Drafts were tightened before release: Ruby CSRF excludes webhook, callback
+and API controllers (21 hits before), `permit!` needs a model write or a
+returned strong-params value (sliced and nested hashes were matching), and
+a listed `include:` reports once per setting rather than once per item.
