@@ -18,6 +18,33 @@ class InjectionTests {
         // ruleid: traust-java-injection-sql-concat
         em.createNativeQuery("SELECT * FROM users WHERE name = '" + user + "'");
 
+        // ruleid: traust-java-injection-sql-concat
+        stmt.execute(String.format("SELECT * FROM %s WHERE owner = '%s'", table, owner));
+        // ruleid: traust-java-injection-sql-concat
+        stmt.execute(format("DELETE FROM carts WHERE id = '%s'", cartId));
+        String two = "select o from Order o where o.region = '" + region + "' and o.label like '%" + q + "%'";
+        // ruleid: traust-java-injection-sql-concat
+        em.createQuery(two, Order.class).getResultList();
+        String jpql = "select o from Order o where o.region = '" + region + "'";
+        // ruleid: traust-java-injection-sql-concat
+        em.createQuery(jpql, Order.class).getResultList();
+        // ruleid: traust-java-injection-sql-concat
+        session.createSQLQuery("SELECT * FROM t WHERE k = " + key);
+        // ruleid: traust-java-injection-sql-concat
+        jdbc.queryForList("SELECT * FROM t WHERE owner = '" + user + "'");
+
+        // ok: traust-java-injection-sql-concat
+        em.createQuery("select o from Order o where o.region = :region", Order.class).setParameter("region", region);
+        // ok: traust-java-injection-sql-concat
+        stmt.executeQuery("SELECT * FROM users " + "WHERE active = 1");
+        Integer orderId = order.getId();
+        // ok: traust-java-injection-sql-concat
+        em.createQuery("DELETE FROM Order o WHERE o.id=" + orderId).executeUpdate();
+        String fixedQuery = "select o from Order o";
+        // ok: traust-java-injection-sql-concat
+        em.createQuery(fixedQuery, Order.class);
+        // ok: traust-java-injection-sql-concat
+        log.info(String.format("loaded %s", user));
         // ok: traust-java-injection-sql-concat
         PreparedStatement safe = conn.prepareStatement("SELECT * FROM users WHERE name = ?");
         safe.setString(1, user);

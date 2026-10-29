@@ -3,10 +3,11 @@ rules:
     languages: [java]
     severity: ERROR
     message: >-
-      SQL statement built by string concatenation and handed to a JDBC
-      execute call — any interpolated value becomes SQL syntax. Use a
-      PreparedStatement with bind parameters for every variable part.
-      CWE-89; SEI CERT IDS00-J.
+      SQL, JPQL or HQL built by string concatenation or String.format and
+      handed to a JDBC, JPA or Hibernate query call, inline or through a
+      local variable — any interpolated value becomes query syntax. Use a
+      PreparedStatement or a parameterized query (setParameter) for every
+      variable part. CWE-89; SEI CERT IDS00-J.
     metadata:
       cwe: ["CWE-89"]
       category: injection
@@ -15,18 +16,64 @@ rules:
       confidence: HIGH
       references:
         - "seed rule: SEI CERT Oracle Coding Standard for Java, IDS00-J (cited by ID; pattern and text original to this pack)"
+        - "CWE-89 — query text built by String.format or held in a variable before the call"
     patterns:
       - pattern-either:
-          - pattern: $STMT.executeQuery("..." + $X)
-          - pattern: $STMT.executeQuery("..." + $X + "...")
-          - pattern: $STMT.executeUpdate("..." + $X)
-          - pattern: $STMT.executeUpdate("..." + $X + "...")
-          - pattern: $STMT.execute("..." + $X)
-          - pattern: $STMT.execute("..." + $X + "...")
-          - pattern: $CONN.prepareStatement("..." + $X)
-          - pattern: $CONN.prepareStatement("..." + $X + "...")
-          - pattern: $EM.createNativeQuery("..." + $X)
-          - pattern: $EM.createNativeQuery("..." + $X + "...")
+          # concatenated with a non-literal value, inline or through a local
+          - patterns:
+              - pattern-either:
+                  - pattern: $S.$EXEC("..." + $X, ...)
+                  - pattern: $S.$EXEC("..." + $X + "...", ...)
+                  - pattern: $S.$EXEC("..." + $X + "..." + $Y, ...)
+                  - pattern: $S.$EXEC("..." + $X + "..." + $Y + "...", ...)
+                  - patterns:
+                      - pattern-either:
+                          - pattern-inside: |
+                              $T $Q = "..." + $X;
+                              ...
+                          - pattern-inside: |
+                              $T $Q = "..." + $X + "...";
+                              ...
+                          - pattern-inside: |
+                              $Q = "..." + $X;
+                              ...
+                          - pattern-inside: |
+                              $Q = "..." + $X + "...";
+                              ...
+                          - pattern-inside: |
+                              $T $Q = "..." + $X + "..." + $Y + "...";
+                              ...
+                          - pattern-inside: |
+                              $T $Q = "..." + $X + "..." + $Y;
+                              ...
+                      - pattern: $S.$EXEC($Q, ...)
+              # a literal, or a value declared numeric, can't carry query syntax
+              - metavariable-pattern:
+                  metavariable: $X
+                  patterns:
+                    - pattern-not: '"..."'
+                    - pattern-not: (int $V)
+                    - pattern-not: (Integer $V)
+                    - pattern-not: (long $V)
+                    - pattern-not: (Long $V)
+                    - pattern-not: (short $V)
+                    - pattern-not: (Short $V)
+          # formatted, inline or through a local
+          - pattern: $S.$EXEC(String.format("...", $A, ...), ...)
+          - pattern: $S.$EXEC(format("...", $A, ...), ...)
+          - pattern: $S.$EXEC("...".formatted($A, ...), ...)
+          - patterns:
+              - pattern-either:
+                  - pattern-inside: |
+                      $T $Q = String.format("...", $A, ...);
+                      ...
+                  - pattern-inside: |
+                      $Q = String.format("...", $A, ...);
+                      ...
+              - pattern: $S.$EXEC($Q, ...)
+      - metavariable-regex:
+          metavariable: $EXEC
+          regex: ^(executeQuery|executeUpdate|executeLargeUpdate|execute|addBatch|prepareStatement|prepareCall|createQuery|createNativeQuery|createSQLQuery|queryForObject|queryForList|queryForMap|queryForRowSet|batchUpdate)$
 
   - id: traust-java-injection-exec-concat
     languages: [java]

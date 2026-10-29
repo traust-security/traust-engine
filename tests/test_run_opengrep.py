@@ -225,18 +225,22 @@ class TestCoverageBlock(unittest.TestCase):
             root = Path(d)
             (root / "a.py").write_text("x = 1\n")
             (root / "b.rs").write_text("fn main() {}\n")
+            (root / "d.kt").write_text("fun main() {}\n")
             (root / "c.yaml").write_text("k: v\n")  # manifest — excluded
             cov = R.coverage_block(root)
             self.assertIn("python", cov["detected_languages"])
             self.assertIn("rust", cov["detected_languages"])
             self.assertNotIn("yaml", cov["detected_languages"])
             # python is at pack parity (>= threshold): neither thin nor
-            # uncovered; rust has no pack dir: uncovered
+            # uncovered; rust has rules below the threshold: thin; kotlin
+            # has no pack dir: uncovered
             self.assertGreaterEqual(
                 cov["traust_rules_by_language"]["python"], R.THIN_RULE_THRESHOLD
             )
             self.assertNotIn("python", cov["thin_languages"])
-            self.assertIn("rust", cov["uncovered_languages"])
+            self.assertIn("rust", cov["thin_languages"])
+            self.assertNotIn("rust", cov["uncovered_languages"])
+            self.assertIn("kotlin", cov["uncovered_languages"])
 
 
 if __name__ == "__main__":
