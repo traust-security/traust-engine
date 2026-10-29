@@ -252,6 +252,26 @@ Measured on public sample projects (Spring, Rails, FastAPI, axum, tonic):
 
 Precision is unmeasured until the facts are judged (`/mine-ledger`).
 
+v1.14 (2026-10-29): **classic classes for Rust and Ruby.** These rules
+cover well-known vulnerability classes in every supported language, for
+adopters' code, whether or not this deployment's ledger has seen them.
+- **Rust (`rust/injection.yaml`, `rust/authentication.yaml`).**
+  - `injection-sql-format`: format!-built SQL (inline or through a `let`)
+    run through sqlx, diesel, rusqlite or the postgres client.
+  - `injection-shell-format`: `sh -c` / `bash -c` / `cmd /C` with a
+    format!-built command.
+  - `authentication-jwt-validation-disabled`: jsonwebtoken's
+    `insecure_disable_signature_validation`, `validate_exp = false`, or a
+    `dangerous_insecure_decode`.
+- **Ruby (`ruby/injection.yaml`).**
+  - `injection-sql-interpolation`: interpolated SQL in ActiveRecord query
+    methods (`where`, `order`, `joins`, `find_by_sql`,
+    `connection.execute`, …), and a request parameter used as a raw
+    `order`.
+  - `injection-shell-interpolation`: interpolated command strings in
+    `system`, `exec`, `spawn`, backticks, `%x`, `IO.popen` and `Open3`. The
+    multi-argument form is not matched.
+
 v1.15 (2026-10-29): **well-known classes across every application
 language.** These rules are for adopters' code, so each supported language
 covers the classic classes.
