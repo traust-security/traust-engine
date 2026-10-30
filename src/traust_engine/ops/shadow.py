@@ -11,7 +11,6 @@ from datetime import datetime, timedelta
 from time import perf_counter
 from uuid import UUID
 
-from traust_core.v1.context import current_correlation, enrich_correlation
 from traust_core.v1.context.context import Services
 from traust_core.v1.models.base import Model
 from traust_core.v1.models.common import every_item
@@ -27,7 +26,7 @@ from traust_core.v1.models.operations import (
     WorkerId,
 )
 
-from traust_engine.ops.events import lifecycle
+from traust_engine.ops.events import execution_scope, lifecycle
 from traust_engine.ops.runner import CRASHED, outcome
 
 log = logging.getLogger(__name__)
@@ -89,6 +88,43 @@ class Diff(Model):
         return len(self.missed) + len(self.early) + len(self.routes_different)
 
 
+def _complete(
+    services: Services,
+    order_id: UUID,
+    worker: WorkerId,
+    result: JobResult,
+    started: float,
+    *,
+    returncode: int | None = None,
+    error_type: str | None = None,
+) -> RunOrder:
+    try:
+        completed = services.ops.complete(order_id, worker, result)
+    except Exception as error:
+        lifecycle(
+            log,
+            "execution",
+            "failed",
+            started=started,
+            reason="completion_error",
+            returncode=returncode,
+            error_type=type(error).__name__,
+        )
+        raise
+    lifecycle(
+        log,
+        "execution",
+        str(completed.state),
+        started=started,
+        level=logging.INFO if completed.state is OrderState.SUCCEEDED else logging.WARNING,
+        reason=str(result.reason) if result.reason is not None else None,
+        status=str(completed.state),
+        returncode=returncode,
+        error_type=error_type,
+    )
+    return completed
+
+
 def record(
     services: Services,
     request: OrderRequest,
@@ -100,35 +136,39 @@ def record(
     started = perf_counter()
     order = services.ops.start(request, principal, worker, RECORD_LEASE)
     assert order.id is not None
-    if current_correlation() is not None:
-        enrich_correlation(order_id=order.id, run_id=order.id)
-    try:
-        done = subprocess.run(list(argv), capture_output=True, text=True, check=False)
-    except OSError as error:
-        completed = services.ops.complete(order.id, worker, JobResult.failed(CRASHED))
-        lifecycle(
-            log,
-            "execution",
-            str(completed.state),
-            started=started,
-            reason=str(CRASHED),
-            status=str(completed.state),
-            error_type=type(error).__name__,
+    with execution_scope(order.id):
+        try:
+            done = subprocess.run(list(argv), capture_output=True, text=True, check=False)
+        except OSError as error:
+            _complete(
+                services,
+                order.id,
+                worker,
+                JobResult.failed(CRASHED),
+                started,
+                error_type=type(error).__name__,
+            )
+            raise
+        except Exception as error:
+            lifecycle(
+                log,
+                "execution",
+                "failed",
+                started=started,
+                reason="command_error",
+                error_type=type(error).__name__,
+            )
+            raise
+        result = outcome(done)
+        completed = _complete(
+            services,
+            order.id,
+            worker,
+            result,
+            started,
+            returncode=done.returncode,
         )
-        raise
-    result = outcome(done)
-    completed = services.ops.complete(order.id, worker, result)
-    lifecycle(
-        log,
-        "execution",
-        str(completed.state),
-        started=started,
-        level=logging.INFO if completed.state is OrderState.SUCCEEDED else logging.WARNING,
-        reason=str(result.reason) if result.reason is not None else None,
-        status=str(completed.state),
-        returncode=done.returncode,
-    )
-    return completed, done
+        return completed, done
 
 
 def compare_runs(

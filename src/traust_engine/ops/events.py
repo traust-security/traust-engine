@@ -3,7 +3,28 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from time import perf_counter
+from uuid import UUID
+
+from traust_core.v1.context import correlation_scope, current_correlation
+
+
+@contextmanager
+def execution_scope(order_id: UUID) -> Iterator[None]:
+    """Add order/run IDs for one execution, then restore the caller's scope."""
+    current = current_correlation()
+    if current is None:
+        yield
+        return
+    with correlation_scope(
+        current.request_id,
+        order_id=order_id,
+        run_id=order_id,
+        actor_kind=current.actor_kind,
+    ):
+        yield
 
 
 def lifecycle(

@@ -18,7 +18,7 @@ from traust_core.v1.context import (
 )
 from traust_core.v1.errors import ConflictError
 from traust_core.v1.models.identity import Principal
-from traust_core.v1.models.operations import OrderRequest, WorkerId
+from traust_core.v1.models.operations import JobResult, OrderRequest, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
 from traust_engine.ops import cli
@@ -95,8 +95,9 @@ def test_cli_uses_core_outputs_and_scopes_claimed_execution_without_leaks(
     )
     operation_rows = engine[1:]
     assert len({row["request_id"] for row in operation_rows}) == 1
-    assert all(row["order_id"] == str(queued.id) for row in operation_rows)
-    assert all(row["run_id"] == str(queued.id) for row in operation_rows)
+    assert all(row["order_id"] == str(queued.id) for row in operation_rows[:2])
+    assert all(row["run_id"] == str(queued.id) for row in operation_rows[:2])
+    assert operation_rows[2]["order_id"] is None and operation_rows[2]["run_id"] is None
     text = log_file.read_text()
     assert all(value not in text for value in (SECRET, PRIVATE_URL, "--token="))
 
@@ -143,6 +144,9 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
     )
     with correlation_scope("heartbeat-request", actor_kind=ActorKind.MACHINE):
         completed = runner.claim_once()
+        restored = current_correlation()
+        assert restored is not None and restored.order_id is None and restored.run_id is None
+        assert runner.claim_once() is None
     assert completed is not None
     assert seen and seen[0] is not None
     assert (seen[0].request_id, seen[0].order_id, seen[0].run_id) == (
@@ -152,6 +156,11 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
     )
 
     rows = _rows(log_file)
+    leases = [row for row in rows if row["operation"] == "engine.lease"]
+    assert [(row["outcome"], row["order_id"]) for row in leases] == [
+        ("claimed", str(queued.id)),
+        ("empty", None),
+    ]
     heartbeats = [row for row in rows if row["operation"] == "engine.heartbeat"]
     assert len(heartbeats) == 1
     assert (heartbeats[0]["outcome"], heartbeats[0]["reason"]) == (
@@ -195,7 +204,35 @@ def test_recorded_execution_failure_has_no_false_success_or_raw_exception(
         ("engine.record", "failed"),
     ]
     assert engine[1]["error_type"] == "FileNotFoundError"
-    assert engine[1]["order_id"] == engine[2]["order_id"]
+    assert engine[1]["order_id"] is not None and engine[2]["order_id"] is None
+    assert SECRET not in log_file.read_text()
+
+
+def test_completion_rejection_emits_one_bounded_execution_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_file = tmp_path / "completion.log"
+    core_file = _core_file(tmp_path, log_file)
+    Context.from_file(core_file).services().ops.submit(
+        OrderRequest(asset="feeds_cache", priority=1), OPERATOR
+    )
+    answer = JobResult.partly({SECRET: 1}).model_dump_json()
+
+    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(command, 4, answer, "")
+
+    monkeypatch.setattr("traust_engine.ops.runner._run", run)
+    assert cli.main(["claim", "--core", str(core_file), "--pack", str(PACK)]) == 2
+    captured = capsys.readouterr()
+    assert "claim failed" in captured.err and SECRET not in captured.err
+    rows = _rows(log_file)
+    executions = [row for row in rows if row["operation"] == "engine.execution"]
+    assert len(executions) == 1
+    assert (executions[0]["outcome"], executions[0]["reason"]) == (
+        "failed",
+        "completion_error",
+    )
+    assert executions[0]["error_type"] == "ValidationError"
     assert SECRET not in log_file.read_text()
 
 
@@ -246,4 +283,73 @@ def test_preflight_failure_is_bounded_and_terminal(
     startup = [row for row in rows if row["operation"] == "engine.startup"]
     assert len(startup) == 1
     assert (startup[0]["outcome"], startup[0]["reason"]) == ("failed", "preflight_error")
+    assert SECRET not in log_file.read_text()
+
+
+def test_router_setup_failure_has_no_false_ready_or_raw_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_file = tmp_path / "router.log"
+    core_file = _core_file(tmp_path, log_file)
+
+    def fail_router(_: str) -> object:
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(cli, "_router", fail_router)
+    assert (
+        cli.main(
+            [
+                "run",
+                "--once",
+                "--router",
+                "private:Router",
+                "--core",
+                str(core_file),
+                "--pack",
+                str(PACK),
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "startup failed (RuntimeError)" in captured.err
+    assert SECRET not in captured.err and "Traceback" not in captured.err
+    rows = _rows(log_file)
+    startup = [row for row in rows if row["operation"] == "engine.startup"]
+    assert [(row["outcome"], row["reason"]) for row in startup] == [("failed", "preflight_error")]
+    assert SECRET not in log_file.read_text()
+
+
+def test_unclassified_operation_error_is_bounded(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_file = tmp_path / "diff.log"
+    core_file = _core_file(tmp_path, log_file)
+    shadow = tmp_path / "shadow.jsonl"
+    shadow.write_text(SECRET)
+    assert (
+        cli.main(
+            [
+                "diff",
+                "--core",
+                str(core_file),
+                "--pack",
+                str(PACK),
+                "--shadow",
+                str(shadow),
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "diff failed (ValidationError)" in captured.err
+    assert SECRET not in captured.err and "Traceback" not in captured.err
+    rows = _rows(log_file)
+    diff = [row for row in rows if row["operation"] == "engine.diff"]
+    assert len(diff) == 1
+    assert (diff[0]["outcome"], diff[0]["reason"], diff[0]["error_type"]) == (
+        "failed",
+        "operation_error",
+        "ValidationError",
+    )
     assert SECRET not in log_file.read_text()

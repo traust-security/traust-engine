@@ -17,7 +17,6 @@ from time import perf_counter
 from uuid import UUID
 
 from pydantic import ValidationError
-from traust_core.v1.context import current_correlation, enrich_correlation
 from traust_core.v1.context.context import Services
 from traust_core.v1.errors import ConflictError, TraustError
 from traust_core.v1.models.common import every_item
@@ -36,7 +35,7 @@ from traust_core.v1.models.operations import (
 from traust_core.v1.models.values import HttpsRepoUrl
 
 from traust_engine.ops.controller import ENGINE
-from traust_engine.ops.events import lifecycle
+from traust_engine.ops.events import execution_scope, lifecycle
 from traust_engine.ops.pack import AssetSpec, Pack
 
 log = logging.getLogger(__name__)
@@ -116,8 +115,11 @@ class Runner:
             lifecycle(log, "lease", "empty", started=started, level=logging.INFO, count=0)
             return None
         assert order.id is not None
-        if current_correlation() is not None:
-            enrich_correlation(order_id=order.id, run_id=order.id)
+        with execution_scope(order.id):
+            return self._execute(order, started)
+
+    def _execute(self, order: RunOrder, started: float) -> RunOrder:
+        assert order.id is not None
         lifecycle(log, "lease", "claimed", started=started, level=logging.INFO, count=1)
         spec = self._pack.assets.get(AssetName(order.asset))
         if spec is None:
@@ -131,6 +133,16 @@ class Runner:
                 started,
                 error_type=type(error).__name__,
             )
+        except Exception as error:
+            lifecycle(
+                log,
+                "execution",
+                "failed",
+                started=started,
+                reason="command_error",
+                error_type=type(error).__name__,
+            )
+            raise
         stop = threading.Event()
         context = copy_context()
         beat = threading.Thread(
@@ -148,6 +160,16 @@ class Runner:
         except OSError as error:
             error_type = type(error).__name__
             result = JobResult.failed(CRASHED)
+        except Exception as error:
+            lifecycle(
+                log,
+                "execution",
+                "failed",
+                started=started,
+                reason="command_error",
+                error_type=type(error).__name__,
+            )
+            raise
         finally:
             stop.set()
             beat.join()
@@ -168,7 +190,19 @@ class Runner:
         returncode: int | None = None,
         error_type: str | None = None,
     ) -> RunOrder:
-        completed = self._services.ops.complete(order_id, self._worker, result)
+        try:
+            completed = self._services.ops.complete(order_id, self._worker, result)
+        except Exception as error:
+            lifecycle(
+                log,
+                "execution",
+                "failed",
+                started=started,
+                reason="completion_error",
+                returncode=returncode,
+                error_type=type(error).__name__,
+            )
+            raise
         state = str(completed.state)
         lifecycle(
             log,
