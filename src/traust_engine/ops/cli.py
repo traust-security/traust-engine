@@ -93,8 +93,16 @@ def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], sh
             started = perf_counter()
             try:
                 if shadow:
-                    report = Tick(at=core.clock.now(), due=engine.shadow_once().due)
-                    status = f"shadow,due:{len(report.due)}"
+                    shadow_report = engine.shadow_once()
+                    tick = shadow_report.tick
+                    report = Tick(at=core.clock.now(), due=shadow_report.due)
+                    status = (
+                        f"shadow,due:{len(report.due)},planned:{tick.planned},"
+                        f"routed:{tick.routed},unrouted:{tick.unrouted},"
+                        f"refused:{tick.refused_again},stale:{sum(tick.stale.values())},"
+                        f"overdue:{sum(tick.overdue.values())},"
+                        f"unrunnable:{len(tick.unrunnable)}"
+                    )
                 else:
                     report = engine.run_once()
                     status = (

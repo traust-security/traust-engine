@@ -22,6 +22,8 @@ from traust_core.v1.models.operations import JobResult, OrderRequest, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
 from traust_engine.ops import cli
+from traust_engine.ops.controller import TickReport
+from traust_engine.ops.loop import EngineLoop, ShadowReport
 from traust_engine.ops.pack import Pack
 from traust_engine.ops.runner import Runner
 
@@ -267,6 +269,32 @@ def test_run_once_emits_one_bounded_tick_summary_per_selected_output(
         ticks = [row for row in engine if row["operation"] == "engine.tick"]
         assert len(ticks) == 1 and ticks[0]["outcome"] == "completed"
         assert "planned:" in ticks[0]["status"] and "withheld:" in ticks[0]["status"]
+
+
+def test_shadow_once_includes_tick_diagnostics_in_its_terminal_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shadow = ShadowReport(
+        tick=TickReport(
+            planned=1,
+            routed=2,
+            unrouted=3,
+            refused_again=4,
+            stale={"dependent": 5},
+            overdue={"scheduled": 6},
+            unrunnable=("disabled",),
+        ),
+        due=(OrderRequest(asset="feeds_cache", priority=10),),
+    )
+    monkeypatch.setattr(EngineLoop, "shadow_once", lambda _: shadow)
+    log_file = tmp_path / "shadow-tick.log"
+    core_file = _core_file(tmp_path, log_file, ("file",))
+    assert cli.main(["shadow", "--once", "--core", str(core_file), "--pack", str(PACK)]) == 0
+    ticks = [row for row in _rows(log_file) if row["operation"] == "engine.tick"]
+    assert len(ticks) == 1 and ticks[0]["outcome"] == "completed"
+    assert ticks[0]["status"] == (
+        "shadow,due:1,planned:1,routed:2,unrouted:3,refused:4,stale:5,overdue:6,unrunnable:1"
+    )
 
 
 def test_preflight_failure_is_bounded_and_terminal(
