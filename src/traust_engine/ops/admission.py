@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -25,8 +24,6 @@ from traust_core.v1.models.operations import (
 )
 
 from traust_engine.ops.pack import AssetSpec, Pack, Quota
-
-log = logging.getLogger(__name__)
 
 
 class AdmissionReport(Model):
@@ -97,10 +94,6 @@ class Admission:
             paced[asset] += 1
             if verdict is not None and verdict.estimate_usd is not None:
                 committed[verdict.lane] = verdict.estimate_usd
-        if report["withheld"] or report["deferred"]:
-            log.warning(
-                "admission withheld %d, deferred %d", report["withheld"], report["deferred"]
-            )
         return AdmissionReport(**report)
 
     def _verdict(

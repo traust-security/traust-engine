@@ -8,6 +8,7 @@ import argparse
 import getpass
 import importlib
 import json
+import logging
 import os
 import re
 import socket
@@ -17,14 +18,17 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
-from traust_core.v1.context import Context
+from traust_core.v1.context import Context, correlation_scope
 from traust_core.v1.errors import ConfigError, NotFoundError, TraustError
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
+from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
 from traust_engine.ops.runner import Runner, runnable
@@ -37,6 +41,8 @@ from traust_engine.ops.shadow import (
     recorded_runs,
     repository_urls,
 )
+
+log = logging.getLogger(__name__)
 
 _DURATION = re.compile(r"^([1-9]\d*)([mhd])$")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days"}
@@ -77,14 +83,44 @@ def _loop(core: Context, pack: Pack, router: str | None) -> Iterator[EngineLoop]
         )
 
 
+def _request_id(operation: str) -> str:
+    return f"engine-{operation}-{uuid4().hex}"
+
+
 def _passes(args: argparse.Namespace, core: Context, pack: Pack, shadow: bool) -> int:
     with _loop(core, pack, args.router) as engine:
         while True:
-            if shadow:
-                report = Tick(at=core.clock.now(), due=engine.shadow_once().due)
-            else:
-                report = engine.run_once()
-            print(report.model_dump_json(), flush=True)
+            with correlation_scope(_request_id("tick"), actor_kind=ActorKind.MACHINE):
+                started = perf_counter()
+                try:
+                    if shadow:
+                        report = Tick(at=core.clock.now(), due=engine.shadow_once().due)
+                        status = f"shadow,due:{len(report.due)}"
+                    else:
+                        report = engine.run_once()
+                        status = (
+                            f"planned:{report.tick.planned},routed:{report.tick.routed},"
+                            f"unrouted:{report.tick.unrouted},refused:{report.tick.refused_again},"
+                            f"stale:{sum(report.tick.stale.values())},"
+                            f"overdue:{sum(report.tick.overdue.values())},"
+                            f"unrunnable:{len(report.tick.unrunnable)},"
+                            f"admitted:{report.admission.admitted},"
+                            f"approval:{report.admission.awaiting_approval},"
+                            f"withheld:{report.admission.withheld},"
+                            f"deferred:{report.admission.deferred},requeued:{report.requeued}"
+                        )
+                except Exception as error:
+                    lifecycle(
+                        log,
+                        "tick",
+                        "failed",
+                        started=started,
+                        reason="tick_error",
+                        error_type=type(error).__name__,
+                    )
+                    raise
+                lifecycle(log, "tick", "completed", started=started, status=status)
+                print(report.model_dump_json(), flush=True)
             if args.once:
                 return 0
             time.sleep(args.every.total_seconds())
@@ -208,6 +244,10 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _error(operation: str, error: Exception) -> None:
+    print(f"ERROR: {operation} failed ({type(error).__name__})", file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     split = argv.index("--") if "--" in argv else len(argv)
@@ -215,29 +255,75 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.command = argv[split + 1 :]
     try:
         core = Context.from_file(args.core)
-        if args.feeds:
-            core.register_feeds(args.feeds)
-        if args.models:
-            core.register_model_catalog(args.models)
-        pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
-        if args.op in ("run", "shadow", "claim"):
-            # preflight checks tool requirements against core's shipped pins
-            core.register_toolchain()
-        if args.op in ("run", "shadow"):
-            if pack.route_on is not None and not args.router:
-                raise ConfigError(
-                    f"pack {pack.pack} sets route_on {pack.route_on}, but no --router was "
-                    "given -- pass --router module:Class, or drop route_on from the pack"
-                )
-            core.preflight(pack.requirements())
-            return _passes(args, core, pack, shadow=args.op == "shadow")
-        if args.op == "claim":
-            core.preflight(pack.assets[name].requires for name in runnable(pack))
-            return _claim(args, core, pack)
-        return {"record": _record, "diff": _diff}[args.op](args, core, pack)
-    except (OSError, TraustError) as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        core.configure_logging("traust_engine")
+    except (OSError, TraustError) as error:
+        _error("startup", error)
         return 2
+
+    with correlation_scope(_request_id("startup"), actor_kind=ActorKind.MACHINE):
+        started = perf_counter()
+        try:
+            if args.feeds:
+                core.register_feeds(args.feeds)
+            if args.models:
+                core.register_model_catalog(args.models)
+            pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
+            if args.op in ("run", "shadow", "claim"):
+                core.register_toolchain()
+            if args.op in ("run", "shadow"):
+                if pack.route_on is not None and not args.router:
+                    raise ConfigError(
+                        f"pack {pack.pack} sets route_on {pack.route_on}, but no --router was "
+                        "given -- pass --router module:Class, or drop route_on from the pack"
+                    )
+                core.preflight(pack.requirements())
+            if args.op == "claim":
+                core.preflight(pack.assets[name].requires for name in runnable(pack))
+        except (OSError, TraustError) as error:
+            lifecycle(
+                log,
+                "startup",
+                "failed",
+                started=started,
+                reason="preflight_error",
+                error_type=type(error).__name__,
+            )
+            _error("startup", error)
+            return 2
+        lifecycle(log, "startup", "ready", started=started, count=len(pack.assets))
+
+    if args.op in ("run", "shadow"):
+        try:
+            return _passes(args, core, pack, shadow=args.op == "shadow")
+        except (OSError, TraustError) as error:
+            _error("tick", error)
+            return 2
+
+    with correlation_scope(_request_id(args.op), actor_kind=ActorKind.MACHINE):
+        started = perf_counter()
+        try:
+            ops = {"record": _record, "diff": _diff, "claim": _claim}
+            returncode = ops[args.op](args, core, pack)
+        except (OSError, TraustError) as error:
+            lifecycle(
+                log,
+                args.op,
+                "failed",
+                started=started,
+                reason="operation_error",
+                error_type=type(error).__name__,
+            )
+            _error(args.op, error)
+            return 2
+        lifecycle(
+            log,
+            args.op,
+            "completed",
+            started=started,
+            status=f"exit:{returncode}",
+            returncode=returncode,
+        )
+        return returncode
 
 
 if __name__ == "__main__":
