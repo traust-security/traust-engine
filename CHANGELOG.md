@@ -2,6 +2,13 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.40.0]
+
+- Configure engine logs through Core's secure first-party handlers and give startup, tick,
+  lease, execution, record and claim lifecycles bounded correlated outcomes.
+- Propagate order/run correlation into heartbeat threads without logging commands, private
+  repository URLs, credentials, process output or raw exceptions.
+
 ## [0.39.4]
 
 - Leave benchmark worklist validity unanswered instead of emitting the deprecated

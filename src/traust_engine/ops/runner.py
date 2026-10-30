@@ -9,7 +9,9 @@ import re
 import subprocess
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import copy_context
 from datetime import timedelta
+from time import perf_counter
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -19,11 +21,13 @@ from traust_core.v1.models.operations import (
     AssetName,
     JobResult,
     OrderReason,
+    OrderState,
     RunOrder,
     WorkerId,
 )
 from traust_core.v1.models.values import HttpsRepoUrl
 
+from traust_engine.ops.events import execution_scope, lifecycle
 from traust_engine.ops.pack import AssetSpec, Pack
 
 log = logging.getLogger(__name__)
@@ -51,7 +55,6 @@ def _by_exit(done: subprocess.CompletedProcess[str]) -> JobResult:
     """A command that didn't answer with a JobResult: 0 succeeded, anything else crashed."""
     if done.returncode == 0:
         return JobResult.succeeded()
-    log.warning("%s: %s: exit %s", done.args, CRASHED, done.returncode)
     return JobResult.failed(CRASHED)
 
 
@@ -98,33 +101,114 @@ class Runner:
 
     def claim_once(self) -> RunOrder | None:
         """Run one queued order to completion; None when nothing this runner makes is queued."""
+        started = perf_counter()
         ops = self._services.ops
         order = ops.claim(self._worker, self._lease_for, runnable(self._pack))
         if order is None:
+            lifecycle(log, "lease", "empty", started=started, level=logging.INFO, count=0)
             return None
         assert order.id is not None
+        with execution_scope(order.id):
+            return self._execute(order, started)
+
+    def _execute(self, order: RunOrder, started: float) -> RunOrder:
+        assert order.id is not None
+        lifecycle(log, "lease", "claimed", started=started, level=logging.INFO, count=1)
         spec = self._pack.assets.get(AssetName(order.asset))
         if spec is None:
-            return ops.complete(order.id, self._worker, JobResult.failed(NOT_IN_PACK))
+            return self._finish(order.id, JobResult.failed(NOT_IN_PACK), started)
         try:
             command = argv(spec, self._values(order, spec))
-        except (UnresolvedParam, ValueError, TraustError) as e:
-            log.warning("order %s: %s: %s", order.id, BAD_REQUEST, e)
-            return ops.complete(order.id, self._worker, JobResult.failed(BAD_REQUEST))
-        log.info("order %s: running %s", order.id, order.asset)
+        except (UnresolvedParam, ValueError, TraustError) as error:
+            return self._finish(
+                order.id,
+                JobResult.failed(BAD_REQUEST),
+                started,
+                error_type=type(error).__name__,
+            )
+        except Exception as error:
+            lifecycle(
+                log,
+                "execution",
+                "failed",
+                started=started,
+                reason="command_error",
+                error_type=type(error).__name__,
+            )
+            raise
         stop = threading.Event()
-        beat = threading.Thread(target=self._heartbeat, args=(order.id, stop), daemon=True)
+        context = copy_context()
+        beat = threading.Thread(
+            target=context.run,
+            args=(self._heartbeat, order.id, stop),
+            daemon=True,
+        )
         beat.start()
+        returncode = None
+        error_type = None
         try:
             done = self._run(command)
+            returncode = done.returncode
             result = outcome(done)
-        except OSError as e:
-            log.warning("order %s: %s: %s", order.id, CRASHED, e)
+        except OSError as error:
+            error_type = type(error).__name__
             result = JobResult.failed(CRASHED)
+        except Exception as error:
+            lifecycle(
+                log,
+                "execution",
+                "failed",
+                started=started,
+                reason="command_error",
+                error_type=type(error).__name__,
+            )
+            raise
         finally:
             stop.set()
             beat.join()
-        return ops.complete(order.id, self._worker, result)
+        return self._finish(
+            order.id,
+            result,
+            started,
+            returncode=returncode,
+            error_type=error_type,
+        )
+
+    def _finish(
+        self,
+        order_id: UUID,
+        result: JobResult,
+        started: float,
+        *,
+        returncode: int | None = None,
+        error_type: str | None = None,
+    ) -> RunOrder:
+        try:
+            completed = self._services.ops.complete(order_id, self._worker, result)
+        except Exception as error:
+            lifecycle(
+                log,
+                "execution",
+                "failed",
+                started=started,
+                reason="completion_error",
+                returncode=returncode,
+                error_type=type(error).__name__,
+            )
+            raise
+        state = str(completed.state)
+        lifecycle(
+            log,
+            "execution",
+            state,
+            started=started,
+            level=logging.INFO if completed.state is OrderState.SUCCEEDED else logging.WARNING,
+            reason=str(result.reason) if result.reason is not None else None,
+            status=state,
+            returncode=returncode,
+            error_type=error_type,
+        )
+        return completed
 
     def _values(self, order: RunOrder, spec: AssetSpec) -> dict[str, str]:
         """What the order supplies: its id, the asset's model role, the rule that routed it, and
@@ -142,10 +226,18 @@ class Runner:
 
     def _heartbeat(self, order_id: UUID, stop: threading.Event) -> None:
         while not stop.wait(self._lease_for.total_seconds() / 3):
+            started = perf_counter()
             try:
                 self._services.ops.heartbeat(order_id, self._worker, self._lease_for)
-            except ConflictError as e:
-                log.warning("order %s: lease lost: %s", order_id, e)
+            except ConflictError as error:
+                lifecycle(
+                    log,
+                    "heartbeat",
+                    "lease_lost",
+                    started=started,
+                    reason="lease_conflict",
+                    error_type=type(error).__name__,
+                )
                 return
 
 

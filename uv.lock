@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -858,7 +858,7 @@ wheels = [
 [[package]]
 name = "traust-contracts"
 version = "0.0.0"
-source = { git = "https://github.com/traust-security/traust-contracts.git?rev=762b92f6286edd5056d652e88fa7bb4cea983a57#762b92f6286edd5056d652e88fa7bb4cea983a57" }
+source = { git = "https://github.com/traust-security/traust-contracts.git?rev=de8405b3a10177899e560f95256fe4afa4eb44ab#de8405b3a10177899e560f95256fe4afa4eb44ab" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -868,7 +868,7 @@ dependencies = [
 [[package]]
 name = "traust-core"
 version = "0.1.0"
-source = { git = "https://github.com/traust-security/traust-core.git?rev=acf67b8a4409ed7afa1b79d7954636b5b169fa64#acf67b8a4409ed7afa1b79d7954636b5b169fa64" }
+source = { git = "https://github.com/traust-security/traust-core.git?rev=ffa462ef4e50dbcf736bfec8f1d685bbd93ab4b4#ffa462ef4e50dbcf736bfec8f1d685bbd93ab4b4" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "traust-engine"
-version = "0.39.4"
+version = "0.40.0"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
@@ -906,7 +906,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "pyyaml" },
-    { name = "traust-core", git = "https://github.com/traust-security/traust-core.git?rev=acf67b8a4409ed7afa1b79d7954636b5b169fa64" },
+    { name = "traust-core", git = "https://github.com/traust-security/traust-core.git?rev=ffa462ef4e50dbcf736bfec8f1d685bbd93ab4b4" },
 ]
 
 [package.metadata.requires-dev]
@@ -920,7 +920,7 @@ dev = [
 [[package]]
 name = "traust-ledger"
 version = "0.0.0"
-source = { git = "https://github.com/traust-security/traust-ledger.git?rev=461f00d1a935f50c0f504e0694b258873d12ccfe#461f00d1a935f50c0f504e0694b258873d12ccfe" }
+source = { git = "https://github.com/traust-security/traust-ledger.git?rev=deb46664c0f95ec32f46b42056da42f83ef2da69#deb46664c0f95ec32f46b42056da42f83ef2da69" }
 
 [[package]]
 name = "tree-sitter"

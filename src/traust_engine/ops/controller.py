@@ -90,7 +90,6 @@ class Controller(Generic[S]):
             order = self._ops.plan(request, ENGINE, self._pack.config())
             assert order.id is not None
             self._ops.withhold(order.id, OrderReason.UPSTREAM_STALE)
-        log.info("tick planned %d orders, routed %d repositories", report.planned, report.routed)
         return report
 
     def due(
@@ -100,8 +99,6 @@ class Controller(Generic[S]):
         stops it would record on the feed, writing nothing: the shadow run's view of the loop."""
         now = self._clock.now()
         unrunnable = self._pack.unrunnable()
-        if unrunnable:
-            log.warning("not planned, no run or model.role: %s", ", ".join(unrunnable))
         requests, routed, unrouted, refused_again = self._route(now, unrunnable)
         planned, stale, stops = 0, {}, []
         for name in self._pack.topo_order():
@@ -127,8 +124,6 @@ class Controller(Generic[S]):
                     continue
                 requests.append(request)
                 planned += 1
-        for name, count in stale.items():
-            log.warning("%s: %d subjects wait on stale upstreams; not planned", name, count)
         overdue = self._overdue(repositories, now, unrunnable)
         report = TickReport(
             planned=planned,
@@ -170,7 +165,6 @@ class Controller(Generic[S]):
             fresh = self._ops.subjects(name, MATERIALIZED, now - spec.freshness.fail)
             if count := len(subjects - fresh):
                 overdue[name] = count
-                log.warning("%s: %d subjects past freshness.fail", name, count)
         return overdue
 
     def _route(
@@ -190,8 +184,7 @@ class Controller(Generic[S]):
         for repository_id in changed | refusals.keys() | releases.keys():
             try:
                 state = self._state_of(repository_id)
-            except NotFoundError as e:
-                log.warning("not routed: %s", e)
+            except NotFoundError:
                 unrouted += 1
                 continue
             refused = refusals.get(repository_id, [])
@@ -199,9 +192,6 @@ class Controller(Generic[S]):
                 if route.lane is None:
                     continue
                 if route.lane in {r.lane for r in refused}:
-                    log.warning(
-                        "not planned: %s back into %s, which refused it", repository_id, route.lane
-                    )
                     refused_again += 1
                     continue
                 try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -268,7 +269,17 @@ def test_a_route_to_an_unrunnable_lane_plans_nothing_for_it(tmp_path: Path) -> N
 def test_a_route_to_a_lane_no_asset_runs_plans_nothing_for_it(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    services, _, repo = _routed_once(tmp_path, Pack.load(PACK), TableAndAdditiveRouter())
+    logger = logging.getLogger("traust_engine.ops.controller")
+    level, propagate = logger.level, logger.propagate
+    logger.setLevel(logging.WARNING)
+    logger.propagate = False
+    logger.addHandler(caplog.handler)
+    try:
+        services, _, repo = _routed_once(tmp_path, Pack.load(PACK), TableAndAdditiveRouter())
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.setLevel(level)
+        logger.propagate = propagate
     assert _routed_orders(services) == [("diff_scan", "diff-scan", "rule-5", repo)]
     assert "routed lanes no pack asset runs: iac-lane" in caplog.text
 

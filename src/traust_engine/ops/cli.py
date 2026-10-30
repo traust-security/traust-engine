@@ -8,23 +8,27 @@ import argparse
 import getpass
 import importlib
 import json
+import logging
 import os
 import re
 import socket
 import sys
 import time
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
-from traust_core.v1.context import Context
-from traust_core.v1.errors import ConfigError, NotFoundError, TraustError
+from traust_core.v1.context import Context, correlation_scope
+from traust_core.v1.errors import ConfigError, NotFoundError
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
+from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
 from traust_engine.ops.runner import Runner
@@ -37,6 +41,8 @@ from traust_engine.ops.shadow import (
     recorded_runs,
     repository_urls,
 )
+
+log = logging.getLogger(__name__)
 
 _DURATION = re.compile(r"^([1-9]\d*)([mhd])$")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days"}
@@ -77,17 +83,54 @@ def _loop(core: Context, pack: Pack, router: str | None) -> Iterator[EngineLoop]
         )
 
 
-def _passes(args: argparse.Namespace, core: Context, pack: Pack, shadow: bool) -> int:
-    with _loop(core, pack, args.router) as engine:
-        while True:
-            if shadow:
-                report = Tick(at=core.clock.now(), due=engine.shadow_once().due)
-            else:
-                report = engine.run_once()
+def _request_id(operation: str) -> str:
+    return f"engine-{operation}-{uuid4().hex}"
+
+
+def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], shadow: bool) -> int:
+    while True:
+        with correlation_scope(_request_id("tick"), actor_kind=ActorKind.MACHINE):
+            started = perf_counter()
+            try:
+                if shadow:
+                    shadow_report = engine.shadow_once()
+                    tick = shadow_report.tick
+                    report = Tick(at=core.clock.now(), due=shadow_report.due)
+                    status = (
+                        f"shadow,due:{len(report.due)},planned:{tick.planned},"
+                        f"routed:{tick.routed},unrouted:{tick.unrouted},"
+                        f"refused:{tick.refused_again},stale:{sum(tick.stale.values())},"
+                        f"overdue:{sum(tick.overdue.values())},"
+                        f"unrunnable:{len(tick.unrunnable)}"
+                    )
+                else:
+                    report = engine.run_once()
+                    status = (
+                        f"planned:{report.tick.planned},routed:{report.tick.routed},"
+                        f"unrouted:{report.tick.unrouted},refused:{report.tick.refused_again},"
+                        f"stale:{sum(report.tick.stale.values())},"
+                        f"overdue:{sum(report.tick.overdue.values())},"
+                        f"unrunnable:{len(report.tick.unrunnable)},"
+                        f"admitted:{report.admission.admitted},"
+                        f"approval:{report.admission.awaiting_approval},"
+                        f"withheld:{report.admission.withheld},"
+                        f"deferred:{report.admission.deferred},requeued:{report.requeued}"
+                    )
+            except Exception as error:
+                lifecycle(
+                    log,
+                    "tick",
+                    "failed",
+                    started=started,
+                    reason="tick_error",
+                    error_type=type(error).__name__,
+                )
+                raise
+            lifecycle(log, "tick", "completed", started=started, status=status)
             print(report.model_dump_json(), flush=True)
-            if args.once:
-                return 0
-            time.sleep(args.every.total_seconds())
+        if args.once:
+            return 0
+        time.sleep(args.every.total_seconds())
 
 
 def _record(args: argparse.Namespace, core: Context, pack: Pack) -> int:
@@ -208,6 +251,10 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _error(operation: str, error: Exception) -> None:
+    print(f"ERROR: {operation} failed ({type(error).__name__})", file=sys.stderr)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     split = argv.index("--") if "--" in argv else len(argv)
@@ -215,18 +262,70 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.command = argv[split + 1 :]
     try:
         core = Context.from_file(args.core)
-        if args.feeds:
-            core.register_feeds(args.feeds)
-        if args.models:
-            core.register_model_catalog(args.models)
-        pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
-        if args.op in ("run", "shadow"):
-            return _passes(args, core, pack, shadow=args.op == "shadow")
-        ops = {"record": _record, "diff": _diff, "claim": _claim}
-        return ops[args.op](args, core, pack)
-    except (OSError, TraustError) as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        core.configure_logging("traust_engine")
+    except Exception as error:
+        _error("startup", error)
         return 2
+
+    with ExitStack() as stack:
+        with correlation_scope(_request_id("startup"), actor_kind=ActorKind.MACHINE):
+            started = perf_counter()
+            try:
+                if args.feeds:
+                    core.register_feeds(args.feeds)
+                if args.models:
+                    core.register_model_catalog(args.models)
+                pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
+                engine = (
+                    stack.enter_context(_loop(core, pack, args.router))
+                    if args.op in ("run", "shadow")
+                    else None
+                )
+            except Exception as error:
+                lifecycle(
+                    log,
+                    "startup",
+                    "failed",
+                    started=started,
+                    reason="preflight_error",
+                    error_type=type(error).__name__,
+                )
+                _error("startup", error)
+                return 2
+            lifecycle(log, "startup", "ready", started=started, count=len(pack.assets))
+
+        if engine is not None:
+            try:
+                return _passes(args, core, engine, shadow=args.op == "shadow")
+            except Exception as error:
+                _error("tick", error)
+                return 2
+
+        with correlation_scope(_request_id(args.op), actor_kind=ActorKind.MACHINE):
+            started = perf_counter()
+            try:
+                ops = {"record": _record, "diff": _diff, "claim": _claim}
+                returncode = ops[args.op](args, core, pack)
+            except Exception as error:
+                lifecycle(
+                    log,
+                    args.op,
+                    "failed",
+                    started=started,
+                    reason="operation_error",
+                    error_type=type(error).__name__,
+                )
+                _error(args.op, error)
+                return 2
+            lifecycle(
+                log,
+                args.op,
+                "completed",
+                started=started,
+                status=f"exit:{returncode}",
+                returncode=returncode,
+            )
+            return returncode
 
 
 if __name__ == "__main__":
