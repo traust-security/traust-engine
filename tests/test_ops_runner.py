@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -40,9 +41,17 @@ from traust_engine.ops.pack import Pack
 from traust_engine.ops.runner import Runner, UnresolvedParam, argv, runnable
 
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
+MODELS = Path(__file__).parent / "fixtures" / "config" / "model-registry.yaml"
 WORKER = WorkerId("runner-1")
 OPERATOR = Principal(identity="op@example.com", kind=ActorKind.HUMAN, display="op")
 HOSTS = ("github.com",)
+
+
+def _core(tmp_path: Path) -> Path:
+    core = tmp_path / "core.yaml"
+    core.write_text(yaml.safe_dump({"home": str(tmp_path / "store")}))
+    shutil.copytree(Path(__file__).parent / "fixtures" / "config", tmp_path, dirs_exist_ok=True)
+    return core
 
 
 class Commands:
@@ -85,6 +94,12 @@ def test_only_command_assets_are_runnable() -> None:
     pack = Pack.load(PACK)
     assert set(runnable(pack)) == {"feeds_cache", "repo_state", "diff_scan"}
     assert "dependency_graph" not in runnable(pack)  # a skill session: a launcher's job
+
+
+def test_a_disabled_asset_is_not_claimable() -> None:
+    raw = yaml.safe_load(PACK.read_text())
+    raw["assets"]["diff_scan"]["enabled"] = False
+    assert "diff_scan" not in runnable(Pack.model_validate(raw))
 
 
 @pytest.mark.parametrize(
@@ -242,8 +257,7 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
 def test_claim_from_the_cli_runs_one_order_and_exits_with_its_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    core = tmp_path / "core.yaml"
-    core.write_text(yaml.safe_dump({"home": str(tmp_path / "store")}))
+    core = _core(tmp_path)
     _submit(Context.from_file(core), "feeds_cache")
     monkeypatch.setattr("traust_engine.ops.runner._run", Commands("", 1))
 
@@ -300,8 +314,7 @@ def test_a_skill_session_with_a_command_runs_with_its_role(
 def test_a_feed_degraded_by_name_completes_once_the_pack_feeds_are_known(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    core = tmp_path / "core.yaml"
-    core.write_text(yaml.safe_dump({"home": str(tmp_path / "store")}))
+    core = _core(tmp_path)
     answer = JobResult.partly({"kev": 1}).model_dump_json()
     common = ["--core", str(core), "--pack", str(PACK)]
 
@@ -318,7 +331,6 @@ def test_a_feed_degraded_by_name_completes_once_the_pack_feeds_are_known(
     assert (rc, json.loads(out)["state"]) == (4, "degraded")
 
 
-MODELS = Path(__file__).parent / "fixtures" / "config" / "model-registry.yaml"
 SESSION = ModelUsage(
     provider=ProviderName("anthropic"),
     model=ModelName("claude-opus-5"),
@@ -340,8 +352,7 @@ def test_a_session_that_answers_its_usage_settles_it_as_the_orders_spend(
     models: bool,
     spend: list[tuple[str, str, Decimal]],
 ) -> None:
-    core = tmp_path / "core.yaml"
-    core.write_text(yaml.safe_dump({"home": str(tmp_path / "store")}))
+    core = _core(tmp_path)
     request = OrderRequest(asset="feeds_cache", priority=1, lane=LaneName("full-audit"))
     queued = Context.from_file(core).services().ops.submit(request, OPERATOR)
     answer = JobResult.succeeded().model_copy(update={"usage": (SESSION,)}).model_dump_json()

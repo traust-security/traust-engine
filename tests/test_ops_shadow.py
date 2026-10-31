@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import shutil
 import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
@@ -193,14 +194,25 @@ class EveryRepoToDiffScan:
 def core(tmp_path: Path) -> Path:
     path = tmp_path / "core.yaml"
     path.write_text(yaml.safe_dump({"home": str(tmp_path / "store")}))
+    shutil.copytree(Path(__file__).parent / "fixtures" / "config", tmp_path, dirs_exist_ok=True)
     return path
 
 
-def _cli(core: Path, op: str, *argv: str) -> tuple[int, str]:
+def _cli(core: Path, op: str, *argv: str, pack: Path = PACK) -> tuple[int, str]:
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        rc = cli.main([op, "--core", str(core), "--pack", str(PACK), *argv])
+        rc = cli.main([op, "--core", str(core), "--pack", str(pack), *argv])
     return rc, out.getvalue()
+
+
+def _unrouted_pack(tmp_path: Path) -> Path:
+    """The fixture pack without route_on: a deployment that does not route starts with no
+    --router."""
+    raw = yaml.safe_load(PACK.read_text())
+    del raw["route_on"]
+    path = tmp_path / "assets.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return path
 
 
 def _orders(core: Path) -> list[RunOrder]:
@@ -273,7 +285,7 @@ def test_a_command_that_cannot_start_fails_its_order(core: Path) -> None:
 def test_shadow_prints_what_a_pass_would_plan_and_diff_compares_it(
     core: Path, tmp_path: Path
 ) -> None:
-    rc, line = _cli(core, "shadow", "--once")
+    rc, line = _cli(core, "shadow", "--once", pack=_unrouted_pack(tmp_path))
     tick = Tick.model_validate_json(line)
     assert rc == 0 and _orders(core) == []
     assert [d.asset for d in tick.due] == ["feeds_cache"]
@@ -312,11 +324,27 @@ def test_diff_exits_1_on_a_difference_and_compares_the_routes(core: Path, tmp_pa
     ]
 
 
+def test_diff_ignores_expected_routes_to_a_disabled_assets_lane(core: Path, tmp_path: Path) -> None:
+    _, url = _repository(core)
+    raw = yaml.safe_load(PACK.read_text())
+    raw["assets"]["diff_scan"]["enabled"] = False
+    pack = tmp_path / "assets.yaml"
+    pack.write_text(yaml.safe_dump(raw))
+    shadow = tmp_path / "shadow.jsonl"
+    shadow.write_text(_tick(datetime.now(UTC) - 3 * HOUR).model_dump_json())
+    routes = tmp_path / "worklist.json"
+    routes.write_text(json.dumps({"decisions": [{"repo_url": url, "lane": "diff-scan"}]}))
+
+    rc, out = _cli(core, "diff", "--shadow", str(shadow), "--routes", str(routes), pack=pack)
+
+    assert rc == 0 and json.loads(out)["routes_different"] == []
+
+
 def test_a_router_that_cannot_be_imported_is_a_config_error(core: Path) -> None:
     assert _cli(core, "shadow", "--once", "--router", "no.such.module:Router")[0] == 2
 
 
-def test_run_once_plans_and_admits(core: Path) -> None:
-    rc, out = _cli(core, "run", "--once")
+def test_run_once_plans_and_admits(core: Path, tmp_path: Path) -> None:
+    rc, out = _cli(core, "run", "--once", pack=_unrouted_pack(tmp_path))
     assert rc == 0 and json.loads(out)["tick"]["planned"] == 1
     assert [o.asset for o in _orders(core)] == ["feeds_cache"]

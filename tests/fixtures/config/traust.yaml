@@ -1,0 +1,9 @@
+# The suite's config home passes core's preflight completeness audit: locations and the
+# ledger key are the fields it warns about (conftest copies this directory to
+# $TRAUST_CONFIG_HOME; preflight promotes the audit's warnings to findings).
+locations:
+  workspace: ws
+  analysis_results: results
+  progress_tracker: tracker
+ledger:
+  public_key_path: ledger-signing-key.pub

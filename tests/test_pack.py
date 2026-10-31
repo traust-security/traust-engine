@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pydantic
 import pytest
+import yaml
 from traust_core.v1.errors import ConfigError
-from traust_core.v1.models.operations import LaneName
+from traust_core.v1.models.operations import LaneName, Requirement
 
 from traust_engine.ops.admission import TokenBucket
 from traust_engine.ops.pack import Pack
@@ -106,5 +108,50 @@ def test_a_missing_pin_file_is_a_config_error(tmp_path: Path) -> None:
         Pack.load(PACK, tmp_path / "external-tools.yaml")
 
 
+def test_an_enabled_asset_without_run_or_model_role_is_a_pack_error(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="enabled: false is the exemption"):
+        Pack.load(_write(tmp_path, "pack: p\nassets:\n  a: {trigger: {every: 24h}}\n"))
+
+
+def test_a_disabled_asset_is_exempt_from_its_requirements(tmp_path: Path) -> None:
+    pack = Pack.load(
+        _write(
+            tmp_path,
+            "pack: p\n"
+            "assets:\n"
+            "  a: {run: [x], trigger: {every: 24h}}\n"
+            "  b: {enabled: false, requires: {facts: [sla-policy]}}\n",
+        )
+    )
+    assert pack.requirements() == (Requirement(),)
+
+
 def test_a_pack_built_in_code_records_no_config() -> None:
     assert Pack.model_validate({"pack": "p", "assets": {}}).config() == ()
+
+
+def test_an_enabled_asset_depending_on_a_disabled_one_is_a_pack_error() -> None:
+    raw = yaml.safe_load(PACK.read_text())
+    raw["assets"]["feeds_cache"]["enabled"] = False  # repo_state deps on it
+    with pytest.raises(pydantic.ValidationError, match="depend on disabled"):
+        Pack.model_validate(raw)
+
+
+def test_route_on_a_disabled_asset_is_a_pack_error() -> None:
+    raw = yaml.safe_load(PACK.read_text())
+    raw["assets"][raw["route_on"]]["enabled"] = False
+    with pytest.raises(pydantic.ValidationError, match="route_on"):
+        Pack.model_validate(raw)
+
+
+def test_the_packs_lanes_are_the_enabled_assets_lanes() -> None:
+    raw = yaml.safe_load(PACK.read_text())
+    enabled = Pack.model_validate(raw).lanes
+    disabled = [
+        lane for a in raw["assets"].values() for lane in a.get("trigger", {}).get("lanes", [])
+    ]
+    raw["assets"]["diff_scan"]["enabled"] = False
+    assert set(Pack.model_validate(raw).lanes) == set(enabled) - {
+        lane for a in [raw["assets"]["diff_scan"]] for lane in a["trigger"]["lanes"]
+    }
+    assert set(disabled) >= set(Pack.model_validate(raw).lanes)

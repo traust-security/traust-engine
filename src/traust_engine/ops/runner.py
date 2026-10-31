@@ -56,9 +56,9 @@ def _by_exit(done: subprocess.CompletedProcess[str]) -> JobResult:
 
 
 def runnable(pack: Pack) -> tuple[AssetName, ...]:
-    """The assets this runner makes: those with a command; a model role without one has nothing
-    to start its session with."""
-    return tuple(name for name, spec in pack.assets.items() if spec.run)
+    """The assets this runner makes: enabled, with a command; a model role without one has
+    nothing to start its session with."""
+    return tuple(name for name, spec in pack.assets.items() if spec.enabled and spec.run)
 
 
 class UnresolvedParam(TraustError):
