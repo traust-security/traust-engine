@@ -145,11 +145,9 @@ BOUNDARY_EXPOSURE_ENUM = {"public", "tenant", "partner", "internal"}
 BOUNDARY_COMPLEXITY_ENUM = {"low", "medium", "high"}
 DIMENSION_RESULT_ENUM = {"yes", "partial", "no", "na"}
 BOUNDARY_ID = re.compile(r"^IF-\d+$")
-# empty cell valid; otherwise an analysis-results/isolation/<service-slug>/
-# directory (optionally a file inside it)
-ISOLATION_REVIEW_REF = re.compile(
-    r"^analysis-results/isolation/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]*)*$"
-)
+# empty cell valid; otherwise the isolation review's artifact row id — the store owns
+# artifacts, and a file path is not an id
+ISOLATION_REVIEW_REF = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 ASSETS_COLUMNS = ["asset", "description", "sensitivity"]
 ASSETS_OPTIONAL_COLUMNS = ["regulatory_scope", "example_records"]
 ENTRY_COLUMNS = ["entry_point", "description", "trust_boundary", "reachable_assets"]
@@ -641,8 +639,7 @@ def lint_file(path, strict=False):
                 if ref and not ISOLATION_REVIEW_REF.match(ref):
                     errors.append(
                         f"section 10 {bid}: isolation_review_ref '{ref}' must "
-                        f"be empty or an analysis-results/isolation/"
-                        f"<service-slug>/ path"
+                        f"be empty or an isolation-review artifact id"
                     )
 
     # -- Section 11: Risk ratings (required when section 4 is OWASP-rated) -----
