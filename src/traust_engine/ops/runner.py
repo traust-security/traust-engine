@@ -1,6 +1,8 @@
 """A claim-once runner (design D7): lease one queued order of an asset the pack runs as a
 command, run that command with the order's params, keep the lease alive, complete the order.
-A skill session is a command too: its `run` starts the session, and `{role}` is its model role."""
+A skill session is a command too: its `run` starts the session, and `{role}` is its model role.
+A repository's orders wait for the runner whose lease holds it, so the repository's mirror is
+fetched once per node."""
 
 from __future__ import annotations
 
@@ -15,15 +17,22 @@ from uuid import UUID
 from pydantic import ValidationError
 from traust_core.v1.context.context import Services
 from traust_core.v1.errors import ConflictError, TraustError
+from traust_core.v1.models.common import every_item
 from traust_core.v1.models.operations import (
+    OPEN_ORDER_STATES,
     AssetName,
     JobResult,
+    LaneName,
+    OrderFilter,
     OrderReason,
+    OrderRequest,
+    OrderState,
     RunOrder,
     WorkerId,
 )
 from traust_core.v1.models.values import HttpsRepoUrl
 
+from traust_engine.ops.controller import ENGINE
 from traust_engine.ops.pack import AssetSpec, Pack
 
 log = logging.getLogger(__name__)
@@ -97,12 +106,13 @@ class Runner:
         self._run = run or _run
 
     def claim_once(self) -> RunOrder | None:
-        """Run one queued order to completion; None when nothing this runner makes is queued."""
-        ops = self._services.ops
-        order = ops.claim(self._worker, self._lease_for, runnable(self._pack))
+        """Run one queued order to completion; None when nothing this runner makes is queued, or
+        every queued order belongs to a repository another runner holds."""
+        order = self._lease()
         if order is None:
             return None
         assert order.id is not None
+        ops = self._services.ops
         spec = self._pack.assets.get(AssetName(order.asset))
         if spec is None:
             return ops.complete(order.id, self._worker, JobResult.failed(NOT_IN_PACK))
@@ -125,6 +135,64 @@ class Runner:
             stop.set()
             beat.join()
         return ops.complete(order.id, self._worker, result)
+
+    def _lease(self) -> RunOrder | None:
+        """Lease the next queued order of an asset this runner makes, most important first. A
+        repository another runner holds — its order is in flight, so its node already fetched
+        the repository's mirror — keeps this runner off that repository's other orders: they
+        wait for the holder, and the runner takes other work instead.
+
+        NEED(core: mirror affinity): a hold lasts only while the holder's order is leased —
+        nothing records it between orders — and the claim API filters by asset, not repository,
+        so when the next order waits for its repository's holder this picks a later order here
+        and takes it over through core's `start`."""
+        ops = self._services.ops
+        ops.requeue_expired()  # a claim-once runner runs beside no loop: sweep, as `claim` did
+        assets = set(runnable(self._pack))
+        every_open = list(every_item(lambda p: ops.list(OrderFilter(states=OPEN_ORDER_STATES), p)))
+        open_orders = [order for order in every_open if order.asset in assets]
+        queued = sorted(
+            (o for o in open_orders if o.state == OrderState.QUEUED),
+            key=lambda o: (o.priority, o.created_at, o.id),
+        )
+        if not queued:
+            return None
+        # every open order counts, whatever pack or asset it belongs to: a repository held
+        # by another runner's order is held, not just one this runner could also make
+        held = {
+            o.repository_id
+            for o in every_open
+            if o.state == OrderState.LEASED
+            and o.repository_id is not None
+            and o.lease_holder != self._worker
+        }
+        if queued[0].repository_id not in held:
+            return ops.claim(self._worker, self._lease_for, assets)
+        # `start` leases a pair's open order, whatever its state, so only a pair with no other
+        # open order can be taken over without leasing a planned or already-leased one.
+        busy = {(o.asset, o.repository_id) for o in open_orders if o.state != OrderState.QUEUED}
+        for order in queued:
+            if order.repository_id not in held and (order.asset, order.repository_id) not in busy:
+                taken = self._take(order)
+                if taken is not None:
+                    return taken
+        return None
+
+    def _take(self, order: RunOrder) -> RunOrder | None:
+        """Lease this queued order; None when another runner leased it first."""
+        request = OrderRequest(
+            asset=AssetName(order.asset),
+            priority=order.priority,
+            repository_id=order.repository_id,
+            run_batch_id=order.run_batch_id,
+            lane=LaneName(order.lane) if order.lane is not None else None,
+            rule=order.rule,
+            event_source=order.event_source,
+        )
+        try:
+            return self._services.ops.start(request, ENGINE, self._worker, self._lease_for)
+        except ConflictError:
+            return None
 
     def _values(self, order: RunOrder, spec: AssetSpec) -> dict[str, str]:
         """What the order supplies: its id, the asset's model role, the rule that routed it, and

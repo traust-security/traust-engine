@@ -9,11 +9,13 @@ import io
 import json
 import subprocess
 import sys
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import pytest
 import yaml
@@ -76,9 +78,12 @@ def _submit(
 
 
 def _runner(
-    context: Context, commands: Commands, lease: timedelta = timedelta(minutes=5)
+    context: Context,
+    commands: Commands,
+    lease: timedelta = timedelta(minutes=5),
+    worker: WorkerId = WORKER,
 ) -> Runner:
-    return Runner(context.services(), Pack.load(PACK), WORKER, lease, HOSTS, run=commands)
+    return Runner(context.services(), Pack.load(PACK), worker, lease, HOSTS, run=commands)
 
 
 def test_only_command_assets_are_runnable() -> None:
@@ -355,3 +360,149 @@ def test_a_session_that_answers_its_usage_settles_it_as_the_orders_spend(
     with Context.from_file(core).unit_of_work(SqlTraustUnitOfWork) as uow:
         events = uow.spend_events.list_for_order(queued.id)
     assert [(e.lane, e.skill, e.cost_usd) for e in events] == spend
+
+
+def _repository(context: Context, path: str = "example/app") -> UUID:
+    url = HttpsRepoUrl.parse(f"https://github.com/{path}", HOSTS)
+    repository = context.services().portfolio.register_repository(url, public=True)
+    assert repository.id is not None
+    return repository.id
+
+
+def _order(context: Context, asset: str, repository_id: UUID, priority: int) -> RunOrder:
+    request = OrderRequest(asset=asset, priority=priority, repository_id=repository_id)
+    return context.services().ops.submit(request, OPERATOR)
+
+
+def _hold(
+    context: Context, order: RunOrder, worker: str, lease_for: timedelta = timedelta(minutes=5)
+) -> None:
+    """Lease `order` to `worker` without running it, as a runner mid-command would have."""
+    context.services().ops.start(
+        OrderRequest(asset=order.asset, priority=order.priority, repository_id=order.repository_id),
+        OPERATOR,
+        WorkerId(worker),
+        lease_for,
+    )
+
+
+@pytest.mark.parametrize(
+    ("holder", "worker", "expected"),
+    [
+        (None, "b", ("repo_state", "app")),
+        ("a", "a", ("diff_scan", "app")),
+        ("a", "b", ("repo_state", "other")),
+    ],
+    ids=[
+        "nobody holds it: the first claimer takes it",
+        "the holder takes its repository's next order",
+        "a runner without the mirror does not steal it",
+    ],
+)
+def test_a_repositorys_orders_stick_to_the_runner_that_holds_it(
+    context: Context, holder: str | None, worker: str, expected: tuple[str, str]
+) -> None:
+    app, other = _repository(context), _repository(context, "example/other")
+    held = _order(context, "repo_state", app, priority=0)
+    _order(context, "diff_scan", app, priority=1)
+    _order(context, "repo_state", other, priority=2)
+    if holder is not None:
+        _hold(context, held, holder)
+    done = _runner(context, Commands(), worker=WorkerId(worker)).claim_once()
+    assert done is not None
+    assert (done.asset, done.repository_id) == (
+        expected[0],
+        {"app": app, "other": other}[expected[1]],
+    )
+
+
+def test_every_order_of_a_held_repository_waits(context: Context) -> None:
+    app = _repository(context)
+    held = _order(context, "repo_state", app, priority=0)
+    _order(context, "diff_scan", app, priority=1)
+    _hold(context, held, "a")
+    commands = Commands()
+    assert _runner(context, commands, worker=WorkerId("b")).claim_once() is None
+    assert commands.seen == []
+
+
+def test_a_hold_from_an_asset_the_runner_does_not_make_still_waits(context: Context) -> None:
+    """The hold is the repository's, not the asset's: another pack's leased order for it
+    keeps this runner off its orders too (the mirror lives on the holder's node)."""
+    app = _repository(context)
+    held = _order(context, "dependency_graph", app, priority=0)  # not this runner's asset
+    _order(context, "diff_scan", app, priority=1)
+    _hold(context, held, "a")
+    commands = Commands()
+    assert _runner(context, commands, worker=WorkerId("b")).claim_once() is None
+    assert commands.seen == []
+
+
+@pytest.mark.parametrize(
+    ("free", "expected"),
+    [("complete", "diff_scan"), ("expire", "repo_state")],
+    ids=["the holder's order completed", "the holder's lease expired"],
+)
+def test_freeing_the_hold_lets_other_runners_claim(
+    context: Context, free: str, expected: str
+) -> None:
+    app = _repository(context)
+    held = _order(context, "repo_state", app, priority=0)
+    _order(context, "diff_scan", app, priority=1)
+    _hold(
+        context, held, "a", timedelta(minutes=5) if free == "complete" else timedelta(seconds=0.1)
+    )
+    if free == "complete":
+        context.services().ops.complete(held.id, WorkerId("a"), JobResult.succeeded())
+    else:
+        time.sleep(0.3)  # the lease lapses; the claim sweep requeues it
+    done = _runner(context, Commands(), worker=WorkerId("b")).claim_once()
+    assert done is not None and done.asset == expected
+
+
+def test_a_repositorys_orders_wait_while_their_holder_runs(context: Context) -> None:
+    app = _repository(context)
+    _order(context, "repo_state", app, priority=0)
+    _order(context, "diff_scan", app, priority=1)
+    running, gate = threading.Event(), threading.Event()
+
+    def gated(command: list[str]) -> subprocess.CompletedProcess[str]:
+        running.set()
+        gate.wait()
+        return subprocess.CompletedProcess(command, 0, JobResult.succeeded().model_dump_json(), "")
+
+    holder = Runner(
+        context.services(),
+        Pack.load(PACK),
+        WorkerId("a"),
+        timedelta(minutes=5),
+        HOSTS,
+        gated,
+    )
+    thread = threading.Thread(target=holder.claim_once)
+    thread.start()
+    assert running.wait(5)  # the holder leased repo_state and started its command
+    commands = Commands()
+    assert _runner(context, commands, worker=WorkerId("b")).claim_once() is None
+    assert commands.seen == []
+    gate.set()
+    thread.join(5)
+    done = _runner(context, commands, worker=WorkerId("b")).claim_once()
+    assert done is not None and done.asset == "diff_scan"
+
+
+def test_a_pair_still_waiting_for_admission_is_not_taken_over(context: Context) -> None:
+    """Reaching past a held repository must not lease a pair's planned order (its budget gate)
+    when a later queued order shares the pair."""
+    app, other = _repository(context), _repository(context, "example/other")
+    held = _order(context, "repo_state", app, priority=0)
+    _order(context, "diff_scan", app, priority=1)  # the top queued order: waits for the holder
+    _hold(context, held, "a")
+    planned = context.services().ops.plan(
+        OrderRequest(asset="diff_scan", priority=1, repository_id=other), OPERATOR
+    )
+    _order(context, "diff_scan", other, priority=1)  # submit does not dedupe a planned pair
+    commands = Commands()
+    assert _runner(context, commands, worker=WorkerId("b")).claim_once() is None
+    assert commands.seen == []
+    assert context.services().ops.get(planned.id).state == OrderState.PLANNED
