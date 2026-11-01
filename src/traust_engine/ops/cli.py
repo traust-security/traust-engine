@@ -8,23 +8,28 @@ import argparse
 import getpass
 import importlib
 import json
+import logging
 import os
 import re
 import socket
 import sys
 import time
-from collections.abc import Iterator, Sequence
-from contextlib import contextmanager
+import traceback
+from collections.abc import Collection, Iterator, Sequence
+from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
+from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
-from traust_core.v1.context import Context
-from traust_core.v1.errors import ConfigError, NotFoundError, TraustError
+from traust_core.v1.context import Context, correlation_scope
+from traust_core.v1.errors import ConfigError, NotFoundError, PreflightError, TraustError
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
+from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
 from traust_engine.ops.runner import Runner, runnable
@@ -37,6 +42,8 @@ from traust_engine.ops.shadow import (
     recorded_runs,
     repository_urls,
 )
+
+log = logging.getLogger(__name__)
 
 _DURATION = re.compile(r"^([1-9]\d*)([mhd])$")
 _UNITS = {"m": "minutes", "h": "hours", "d": "days"}
@@ -77,17 +84,81 @@ def _loop(core: Context, pack: Pack, router: str | None) -> Iterator[EngineLoop]
         )
 
 
-def _passes(args: argparse.Namespace, core: Context, pack: Pack, shadow: bool) -> int:
-    with _loop(core, pack, args.router) as engine:
-        while True:
-            if shadow:
-                report = Tick(at=core.clock.now(), due=engine.shadow_once().due)
-            else:
-                report = engine.run_once()
-            print(report.model_dump_json(), flush=True)
-            if args.once:
-                return 0
-            time.sleep(args.every.total_seconds())
+def _request_id(operation: str) -> str:
+    return f"engine-{operation}-{uuid4().hex}"
+
+
+def _labels(names: Collection[str]) -> str:
+    return "|".join(
+        sorted(name if re.fullmatch(r"[a-z][a-z0-9_-]{0,39}", name) else "?" for name in names)[:5]
+    )
+
+
+def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], shadow: bool) -> int:
+    while True:
+        with correlation_scope(_request_id("tick"), actor_kind=ActorKind.MACHINE):
+            started = perf_counter()
+            try:
+                if shadow:
+                    shadow_report = engine.shadow_once()
+                    tick = shadow_report.tick
+                    report = Tick(at=core.clock.now(), due=shadow_report.due)
+                    status = (
+                        f"shadow,due:{len(report.due)},planned:{tick.planned},"
+                        f"routed:{tick.routed},unrouted:{tick.unrouted},"
+                        f"refused:{tick.refused_again},stale:{sum(tick.stale.values())},"
+                        f"overdue:{sum(tick.overdue.values())},"
+                        f"unrunnable:{len(tick.unrunnable)}"
+                    )
+                    withheld = deferred = 0
+                else:
+                    report = engine.run_once()
+                    tick = report.tick
+                    withheld, deferred = report.admission.withheld, report.admission.deferred
+                    status = (
+                        f"planned:{tick.planned},routed:{tick.routed},"
+                        f"unrouted:{tick.unrouted},refused:{tick.refused_again},"
+                        f"stale:{sum(tick.stale.values())},"
+                        f"overdue:{sum(tick.overdue.values())},"
+                        f"unrunnable:{len(tick.unrunnable)},"
+                        f"admitted:{report.admission.admitted},"
+                        f"approval:{report.admission.awaiting_approval},"
+                        f"withheld:{withheld},"
+                        f"deferred:{deferred},requeued:{report.requeued}"
+                    )
+                for label, names in (
+                    ("stale", tick.stale),
+                    ("overdue", tick.overdue),
+                    ("unrunnable", tick.unrunnable),
+                ):
+                    if names:
+                        status += f",{label}_assets:{_labels(names)}"
+                print(report.model_dump_json(), flush=True)
+                unhealthy = bool(
+                    tick.stale or tick.overdue or tick.unrunnable or withheld or deferred
+                )
+                lifecycle(
+                    log,
+                    "tick",
+                    "completed",
+                    started=started,
+                    status=status,
+                    level=logging.WARNING if unhealthy else logging.INFO,
+                )
+            except Exception as error:
+                _debug_failure(error)
+                lifecycle(
+                    log,
+                    "tick",
+                    "failed",
+                    started=started,
+                    reason="tick_error",
+                    error_type=type(error).__name__,
+                )
+                raise
+        if args.once:
+            return 0
+        time.sleep(args.every.total_seconds())
 
 
 def _record(args: argparse.Namespace, core: Context, pack: Pack) -> int:
@@ -208,6 +279,36 @@ def _parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _error(operation: str, error: Exception) -> None:
+    detail = ""
+    if isinstance(error, PreflightError):
+        detail = str(error)
+    elif isinstance(error, ConfigError):
+        if str(error) == "give the command after --, and --repo exactly when the asset has one":
+            detail = str(error)
+        elif "no --router was given" in str(error):
+            detail = "no --router was given; pass --router module:Class or remove route_on"
+        else:
+            detail = "check --core, --pack and the configuration files"
+    elif isinstance(error, NotFoundError):
+        detail = "check the asset and --repo against the pack and inventory"
+    elif isinstance(error, FileNotFoundError) and operation == "startup":
+        detail = "check --core, --pack and pinned file paths"
+    suffix = f": {detail}" if detail else ""
+    print(f"ERROR: {operation} failed ({type(error).__name__}){suffix}", file=sys.stderr)
+
+
+def _debug_failure(error: Exception) -> None:
+    if isinstance(error, (OSError, TraustError)):
+        return
+    frames = [
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in traceback.extract_tb(error.__traceback__)
+        if "/traust_engine/" in frame.filename.replace("\\", "/")
+    ]
+    log.debug("engine unexpected error_type=%s frames=%s", type(error).__name__, frames)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     split = argv.index("--") if "--" in argv else len(argv)
@@ -215,29 +316,101 @@ def main(argv: Sequence[str] | None = None) -> int:
     args.command = argv[split + 1 :]
     try:
         core = Context.from_file(args.core)
-        if args.feeds:
-            core.register_feeds(args.feeds)
-        if args.models:
-            core.register_model_catalog(args.models)
-        pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
-        if args.op in ("run", "shadow", "claim"):
-            # preflight checks tool requirements against core's shipped pins
-            core.register_toolchain()
-        if args.op in ("run", "shadow"):
-            if pack.route_on is not None and not args.router:
-                raise ConfigError(
-                    f"pack {pack.pack} sets route_on {pack.route_on}, but no --router was "
-                    "given -- pass --router module:Class, or drop route_on from the pack"
-                )
-            core.preflight(pack.requirements())
-            return _passes(args, core, pack, shadow=args.op == "shadow")
-        if args.op == "claim":
-            core.preflight(pack.assets[name].requires for name in runnable(pack))
-            return _claim(args, core, pack)
-        return {"record": _record, "diff": _diff}[args.op](args, core, pack)
-    except (OSError, TraustError) as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        core.configure_logging("traust_engine")
+    except Exception as error:
+        _debug_failure(error)
+        _error("startup", error)
         return 2
+
+    opened = perf_counter()
+    try:
+        return _run_with_stack(args, core)
+    except Exception as error:
+        with correlation_scope(_request_id("shutdown"), actor_kind=ActorKind.MACHINE):
+            _debug_failure(error)
+            lifecycle(
+                log,
+                "observation",
+                "failed",
+                started=opened,
+                reason="cleanup_error",
+                error_type=type(error).__name__,
+            )
+            _error("tick", error)
+        return 2
+
+
+def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
+    with ExitStack() as stack:
+        with correlation_scope(_request_id("startup"), actor_kind=ActorKind.MACHINE):
+            started = perf_counter()
+            try:
+                if args.feeds:
+                    core.register_feeds(args.feeds)
+                if args.models:
+                    core.register_model_catalog(args.models)
+                pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
+                if args.op in ("run", "shadow", "claim"):
+                    core.register_toolchain()
+                if args.op in ("run", "shadow"):
+                    if pack.route_on is not None and not args.router:
+                        raise ConfigError(
+                            f"pack {pack.pack} sets route_on {pack.route_on}, but no --router was "
+                            "given -- pass --router module:Class, or drop route_on from the pack"
+                        )
+                    core.preflight(pack.requirements())
+                    engine = stack.enter_context(_loop(core, pack, args.router))
+                else:
+                    if args.op == "claim":
+                        core.preflight(pack.assets[name].requires for name in runnable(pack))
+                    engine = None
+            except Exception as error:
+                _debug_failure(error)
+                lifecycle(
+                    log,
+                    "startup",
+                    "failed",
+                    started=started,
+                    reason="preflight_error",
+                    error_type=type(error).__name__,
+                )
+                _error("startup", error)
+                return 2
+            lifecycle(log, "startup", "ready", started=started, count=len(pack.assets))
+
+        if engine is not None:
+            try:
+                return _passes(args, core, engine, shadow=args.op == "shadow")
+            except Exception as error:
+                _error("tick", error)
+                return 2
+
+        with correlation_scope(_request_id(args.op), actor_kind=ActorKind.MACHINE):
+            started = perf_counter()
+            try:
+                ops = {"record": _record, "diff": _diff, "claim": _claim}
+                returncode = ops[args.op](args, core, pack)
+            except Exception as error:
+                _debug_failure(error)
+                lifecycle(
+                    log,
+                    args.op,
+                    "failed",
+                    started=started,
+                    reason="operation_error",
+                    error_type=type(error).__name__,
+                )
+                _error(args.op, error)
+                return 2
+            lifecycle(
+                log,
+                args.op,
+                "completed",
+                started=started,
+                status=f"exit:{returncode}",
+                returncode=returncode,
+            )
+            return returncode
 
 
 if __name__ == "__main__":
