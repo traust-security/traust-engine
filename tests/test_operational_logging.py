@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import time
 from datetime import timedelta
@@ -22,10 +23,12 @@ from traust_core.v1.models.operations import JobResult, OrderRequest, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
 from traust_engine.ops import cli
+from traust_engine.ops.admission import AdmissionReport
 from traust_engine.ops.controller import TickReport
-from traust_engine.ops.loop import EngineLoop, ShadowReport
+from traust_engine.ops.loop import EngineLoop, PassReport, ShadowReport
 from traust_engine.ops.pack import Pack
 from traust_engine.ops.runner import Runner
+from traust_engine.ops.shadow import Tick
 
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 SECRET = "synthetic-secret-never-log"
@@ -34,21 +37,35 @@ WORKER = WorkerId("logging-runner")
 OPERATOR = Principal(identity="operator@example.test", kind=ActorKind.HUMAN, display="operator")
 
 
-def _core_file(tmp_path: Path, log_file: Path, outputs: tuple[str, ...] | None = ("file",)) -> Path:
+def _core_file(
+    tmp_path: Path,
+    log_file: Path,
+    outputs: tuple[str, ...] | None = ("file",),
+    level: str = "INFO",
+) -> Path:
     path = tmp_path / "core.yaml"
     logging_config: dict[str, object] = {
-        "level": "INFO",
+        "level": level,
         "format": "json",
         "file": str(log_file),
     }
     if outputs is not None:
         logging_config["outputs"] = list(outputs)
     path.write_text(yaml.safe_dump({"home": str(tmp_path / "store"), "logging": logging_config}))
+    shutil.copytree(Path(__file__).parent / "fixtures" / "config", tmp_path, dirs_exist_ok=True)
     return path
 
 
 def _rows(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def _pass_pack(tmp_path: Path) -> Path:
+    raw = yaml.safe_load(PACK.read_text())
+    raw.pop("route_on")
+    path = tmp_path / "pass-pack.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return path
 
 
 def _secret_pack(tmp_path: Path) -> Path:
@@ -250,7 +267,10 @@ def test_run_once_emits_one_bounded_tick_summary_per_selected_output(
 ) -> None:
     log_file = tmp_path / "tick.log"
     core_file = _core_file(tmp_path, log_file, outputs)
-    assert cli.main(["run", "--once", "--core", str(core_file), "--pack", str(PACK)]) == 0
+    assert (
+        cli.main(["run", "--once", "--core", str(core_file), "--pack", str(_pass_pack(tmp_path))])
+        == 0
+    )
     captured = capsys.readouterr()
     selected = outputs or ("stderr", "file")
     destinations = []
@@ -268,6 +288,7 @@ def test_run_once_emits_one_bounded_tick_summary_per_selected_output(
         assert [row["operation"] for row in engine] == ["engine.startup", "engine.tick"]
         ticks = [row for row in engine if row["operation"] == "engine.tick"]
         assert len(ticks) == 1 and ticks[0]["outcome"] == "completed"
+        assert ticks[0]["level"] == "INFO"
         assert "planned:" in ticks[0]["status"] and "withheld:" in ticks[0]["status"]
 
 
@@ -288,12 +309,19 @@ def test_shadow_once_includes_tick_diagnostics_in_its_terminal_summary(
     )
     monkeypatch.setattr(EngineLoop, "shadow_once", lambda _: shadow)
     log_file = tmp_path / "shadow-tick.log"
-    core_file = _core_file(tmp_path, log_file, ("file",))
-    assert cli.main(["shadow", "--once", "--core", str(core_file), "--pack", str(PACK)]) == 0
+    core_file = _core_file(tmp_path, log_file, ("file",), level="WARNING")
+    assert (
+        cli.main(
+            ["shadow", "--once", "--core", str(core_file), "--pack", str(_pass_pack(tmp_path))]
+        )
+        == 0
+    )
     ticks = [row for row in _rows(log_file) if row["operation"] == "engine.tick"]
     assert len(ticks) == 1 and ticks[0]["outcome"] == "completed"
+    assert ticks[0]["level"] == "WARNING"
     assert ticks[0]["status"] == (
-        "shadow,due:1,planned:1,routed:2,unrouted:3,refused:4,stale:5,overdue:6,unrunnable:1"
+        "shadow,due:1,planned:1,routed:2,unrouted:3,refused:4,stale:5,overdue:6,unrunnable:1,"
+        "stale_assets:dependent,overdue_assets:scheduled,unrunnable_assets:disabled"
     )
 
 
@@ -346,6 +374,97 @@ def test_router_setup_failure_has_no_false_ready_or_raw_traceback(
     startup = [row for row in rows if row["operation"] == "engine.startup"]
     assert [(row["outcome"], row["reason"]) for row in startup] == [("failed", "preflight_error")]
     assert SECRET not in log_file.read_text()
+
+
+def test_real_unrunnable_tick_warns_with_warning_only_logging(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pack = _pass_pack(tmp_path)
+    data = yaml.safe_load(pack.read_text())
+    data["assets"]["disabled"] = {"enabled": False, "trigger": {"every": "24h"}}
+    pack.write_text(yaml.safe_dump(data))
+    log_file = tmp_path / "unrunnable.log"
+    core_file = _core_file(tmp_path, log_file, level="WARNING")
+    assert cli.main(["run", "--once", "--core", str(core_file), "--pack", str(pack)]) == 0
+    capsys.readouterr()
+    ticks = [row for row in _rows(log_file) if row["operation"] == "engine.tick"]
+    assert len(ticks) == 1 and ticks[0]["level"] == "WARNING"
+    assert "unrunnable_assets:disabled" in ticks[0]["status"]
+
+
+def test_tick_labels_do_not_log_paths_or_unbounded_names() -> None:
+    labels = cli._labels(("normal", f"https://user:{SECRET}@private.test", "x" * 41))
+    assert labels == "?|?|normal"
+    assert SECRET not in labels
+
+
+def test_unhealthy_admission_tick_survives_warning_only_logging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        EngineLoop,
+        "run_once",
+        lambda _: PassReport(requeued=0, tick=TickReport(), admission=AdmissionReport(withheld=1)),
+    )
+    log_file = tmp_path / "warning.log"
+    core_file = _core_file(tmp_path, log_file, level="WARNING")
+    assert (
+        cli.main(["run", "--once", "--core", str(core_file), "--pack", str(_pass_pack(tmp_path))])
+        == 0
+    )
+    ticks = [row for row in _rows(log_file) if row["operation"] == "engine.tick"]
+    assert len(ticks) == 1 and ticks[0]["level"] == "WARNING"
+    assert "withheld:1" in ticks[0]["status"]
+
+
+def test_failed_tick_output_does_not_log_completion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_file = tmp_path / "tick-output.log"
+    core_file = _core_file(tmp_path, log_file)
+
+    def fail_output(*_: object, **__: object) -> str:
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(Tick, "model_dump_json", fail_output)
+    assert (
+        cli.main(
+            ["shadow", "--once", "--core", str(core_file), "--pack", str(_pass_pack(tmp_path))]
+        )
+        == 2
+    )
+    assert SECRET not in capsys.readouterr().err
+    ticks = [row for row in _rows(log_file) if row["operation"] == "engine.tick"]
+    assert [(row["outcome"], row["reason"]) for row in ticks] == [("failed", "tick_error")]
+    assert SECRET not in log_file.read_text()
+
+
+def test_unexpected_error_logs_only_debug_frame_locations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    log_file = tmp_path / "debug.log"
+    core_file = _core_file(tmp_path, log_file, level="DEBUG")
+
+    def fail_record(*_: object) -> int:
+        raise KeyError(SECRET)
+
+    monkeypatch.setattr(cli, "_record", fail_record)
+    assert cli.main(["record", "--core", str(core_file), "--pack", str(PACK), "feeds_cache"]) == 2
+    assert "record failed (KeyError)" in capsys.readouterr().err
+    text = log_file.read_text()
+    assert "frames=" in text and "cli.py:" in text and "KeyError" in text
+    assert SECRET not in text
+
+
+def test_cli_rejections_name_safe_fixes_without_echoing_untrusted_input(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    core_file = _core_file(tmp_path, tmp_path / "reject.log")
+    assert cli.main(["record", "--core", str(core_file), "--pack", str(PACK), "feeds_cache"]) == 2
+    assert "give the command after --" in capsys.readouterr().err
+    assert cli.main(["record", "--core", str(core_file), "--pack", str(PACK), SECRET]) == 2
+    captured = capsys.readouterr()
+    assert "check the asset and --repo" in captured.err and SECRET not in captured.err
 
 
 def test_unclassified_operation_error_is_bounded(

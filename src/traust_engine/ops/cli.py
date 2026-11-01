@@ -14,7 +14,8 @@ import re
 import socket
 import sys
 import time
-from collections.abc import Iterator, Sequence
+import traceback
+from collections.abc import Collection, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -23,7 +24,7 @@ from typing import Any
 from uuid import uuid4
 
 from traust_core.v1.context import Context, correlation_scope
-from traust_core.v1.errors import ConfigError, NotFoundError
+from traust_core.v1.errors import ConfigError, NotFoundError, PreflightError, TraustError
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
@@ -87,6 +88,12 @@ def _request_id(operation: str) -> str:
     return f"engine-{operation}-{uuid4().hex}"
 
 
+def _labels(names: Collection[str]) -> str:
+    return "|".join(
+        sorted(name if re.fullmatch(r"[a-z][a-z0-9_-]{0,39}", name) else "?" for name in names)[:5]
+    )
+
+
 def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], shadow: bool) -> int:
     while True:
         with correlation_scope(_request_id("tick"), actor_kind=ActorKind.MACHINE):
@@ -103,20 +110,43 @@ def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], sh
                         f"overdue:{sum(tick.overdue.values())},"
                         f"unrunnable:{len(tick.unrunnable)}"
                     )
+                    withheld = deferred = 0
                 else:
                     report = engine.run_once()
+                    tick = report.tick
+                    withheld, deferred = report.admission.withheld, report.admission.deferred
                     status = (
-                        f"planned:{report.tick.planned},routed:{report.tick.routed},"
-                        f"unrouted:{report.tick.unrouted},refused:{report.tick.refused_again},"
-                        f"stale:{sum(report.tick.stale.values())},"
-                        f"overdue:{sum(report.tick.overdue.values())},"
-                        f"unrunnable:{len(report.tick.unrunnable)},"
+                        f"planned:{tick.planned},routed:{tick.routed},"
+                        f"unrouted:{tick.unrouted},refused:{tick.refused_again},"
+                        f"stale:{sum(tick.stale.values())},"
+                        f"overdue:{sum(tick.overdue.values())},"
+                        f"unrunnable:{len(tick.unrunnable)},"
                         f"admitted:{report.admission.admitted},"
                         f"approval:{report.admission.awaiting_approval},"
-                        f"withheld:{report.admission.withheld},"
-                        f"deferred:{report.admission.deferred},requeued:{report.requeued}"
+                        f"withheld:{withheld},"
+                        f"deferred:{deferred},requeued:{report.requeued}"
                     )
+                for label, names in (
+                    ("stale", tick.stale),
+                    ("overdue", tick.overdue),
+                    ("unrunnable", tick.unrunnable),
+                ):
+                    if names:
+                        status += f",{label}_assets:{_labels(names)}"
+                print(report.model_dump_json(), flush=True)
+                unhealthy = bool(
+                    tick.stale or tick.overdue or tick.unrunnable or withheld or deferred
+                )
+                lifecycle(
+                    log,
+                    "tick",
+                    "completed",
+                    started=started,
+                    status=status,
+                    level=logging.WARNING if unhealthy else logging.INFO,
+                )
             except Exception as error:
+                _debug_failure(error)
                 lifecycle(
                     log,
                     "tick",
@@ -126,8 +156,6 @@ def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], sh
                     error_type=type(error).__name__,
                 )
                 raise
-            lifecycle(log, "tick", "completed", started=started, status=status)
-            print(report.model_dump_json(), flush=True)
         if args.once:
             return 0
         time.sleep(args.every.total_seconds())
@@ -252,7 +280,33 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _error(operation: str, error: Exception) -> None:
-    print(f"ERROR: {operation} failed ({type(error).__name__})", file=sys.stderr)
+    detail = ""
+    if isinstance(error, PreflightError):
+        detail = str(error)
+    elif isinstance(error, ConfigError):
+        if str(error) == "give the command after --, and --repo exactly when the asset has one":
+            detail = str(error)
+        elif "no --router was given" in str(error):
+            detail = "no --router was given; pass --router module:Class or remove route_on"
+        else:
+            detail = "check --core, --pack and the configuration files"
+    elif isinstance(error, NotFoundError):
+        detail = "check the asset and --repo against the pack and inventory"
+    elif isinstance(error, FileNotFoundError) and operation == "startup":
+        detail = "check --core, --pack and pinned file paths"
+    suffix = f": {detail}" if detail else ""
+    print(f"ERROR: {operation} failed ({type(error).__name__}){suffix}", file=sys.stderr)
+
+
+def _debug_failure(error: Exception) -> None:
+    if isinstance(error, (OSError, TraustError)):
+        return
+    frames = [
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in traceback.extract_tb(error.__traceback__)
+        if "/traust_engine/" in frame.filename.replace("\\", "/")
+    ]
+    log.debug("engine unexpected error_type=%s frames=%s", type(error).__name__, frames)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -264,6 +318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         core = Context.from_file(args.core)
         core.configure_logging("traust_engine")
     except Exception as error:
+        _debug_failure(error)
         _error("startup", error)
         return 2
 
@@ -291,6 +346,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         core.preflight(pack.assets[name].requires for name in runnable(pack))
                     engine = None
             except Exception as error:
+                _debug_failure(error)
                 lifecycle(
                     log,
                     "startup",
@@ -316,6 +372,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ops = {"record": _record, "diff": _diff, "claim": _claim}
                 returncode = ops[args.op](args, core, pack)
             except Exception as error:
+                _debug_failure(error)
                 lifecycle(
                     log,
                     args.op,
