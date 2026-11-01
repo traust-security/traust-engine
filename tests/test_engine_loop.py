@@ -15,7 +15,7 @@ import pytest
 import yaml
 from traust_core.v1.context import Config, Context
 from traust_core.v1.context.context import Services
-from traust_core.v1.errors import NotFoundError
+from traust_core.v1.errors import ConfigError, NotFoundError
 from traust_core.v1.models.artifacts import RunManifestArtifact
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.inventory import (
@@ -258,19 +258,15 @@ def test_routing_the_same_repository_again_plans_no_second_order(tmp_path: Path)
     assert [o[0] for o in first] == ["diff_scan", "iac_lane"]
 
 
-def test_a_route_to_an_unrunnable_lane_plans_nothing_for_it(tmp_path: Path) -> None:
-    pack = _iac_pack(tmp_path, run=None)
-    assert "iac_lane" in pack.unrunnable()
+def test_a_route_to_a_disabled_assets_lane_plans_nothing_for_it(tmp_path: Path) -> None:
+    pack = _iac_pack(tmp_path, enabled=False)
     services, _, repo = _routed_once(tmp_path, pack, TableAndAdditiveRouter())
     assert _routed_orders(services) == [("diff_scan", "diff-scan", "rule-5", repo)]
 
 
-def test_a_route_to_a_lane_no_asset_runs_plans_nothing_for_it(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    services, _, repo = _routed_once(tmp_path, Pack.load(PACK), TableAndAdditiveRouter())
-    assert _routed_orders(services) == [("diff_scan", "diff-scan", "rule-5", repo)]
-    assert "routed lanes no pack asset runs: iac-lane" in caplog.text
+def test_a_route_to_a_lane_no_asset_runs_fails_the_pass(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="runs no asset for lane"):
+        _routed_once(tmp_path, Pack.load(PACK), TableAndAdditiveRouter())
 
 
 def test_a_repository_the_router_leaves_alone_gets_no_routed_order(tmp_path: Path) -> None:
@@ -548,10 +544,16 @@ def test_admission_records_the_lane_verdict_and_deferred_orders_spend_nothing(
     }
 
 
-def test_an_asset_no_runner_can_make_is_reported_not_planned(tmp_path: Path) -> None:
+def test_a_disabled_asset_is_not_planned_or_reported(tmp_path: Path) -> None:
     raw = yaml.safe_load(PACK.read_text())
-    del raw["assets"]["repo_state"]["run"]
-    raw["assets"]["repo_state"]["freshness"] = {"fail": "48h"}
+    raw["assets"]["repo_state"] |= {
+        "enabled": False,
+        "freshness": {"fail": "48h"},
+        "requires": {"facts": ["sla-policy"]},
+    }
+    raw.pop("route_on")
+    raw["assets"]["dependency_graph"]["enabled"] = False
+    raw["assets"]["diff_scan"]["enabled"] = False
     path = tmp_path / "assets.yaml"
     path.write_text(yaml.safe_dump(raw))
     clock = Clock()
@@ -560,28 +562,9 @@ def test_an_asset_no_runner_can_make_is_reported_not_planned(tmp_path: Path) -> 
 
     report = Controller(Pack.load(path), services.ops, clock).tick(repos)
 
-    assert report.unrunnable == ("repo_state",)
     assert report.planned == 1  # feeds_cache only
     assert "repo_state" not in report.overdue
     assert _by_asset(_orders(services, OrderState.PLANNED)) == {"feeds_cache": 1}
-
-
-def test_a_route_to_a_lane_no_runner_can_make_plans_nothing(tmp_path: Path) -> None:
-    raw = yaml.safe_load(PACK.read_text())
-    del raw["assets"]["diff_scan"]["run"]
-    path = tmp_path / "assets.yaml"
-    path.write_text(yaml.safe_dump(raw))
-    clock = Clock()
-    services = _context(tmp_path, clock).services()
-    _repositories(services, 2)
-    loop = EngineLoop(services, clock, Pack.load(path), LaneRouter(), state_of=lambda r: r)
-    loop.run_once()
-    clock.at += timedelta(minutes=10)
-    _drain(services)
-
-    report = loop.run_once()
-    assert report.tick.routed == 2
-    assert "diff_scan" not in _by_asset(_orders(services, OrderState.QUEUED, OrderState.PLANNED))
 
 
 def test_the_run_manifest_names_the_toolchain_pins_next_to_the_pack(tmp_path: Path) -> None:
@@ -820,3 +803,23 @@ def test_a_restart_does_not_replay_releases_routed_before_it(tmp_path: Path) -> 
     router.releases.clear()
     restarted = EngineLoop(services, clock, Pack.load(PACK), router, state_of=lambda r: r)
     assert restarted.run_once().tick.routed == 0 and router.releases == {}
+
+
+def test_a_corrected_router_retry_reads_the_events_it_failed_on(tmp_path: Path) -> None:
+    """The failed pass puts the feed cursor back, so a corrected router on the same loop
+    routes the repositories the failed pass read (it does not skip past their events)."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 1)
+    loop = EngineLoop(
+        services, clock, Pack.load(PACK), TableAndAdditiveRouter(), state_of=lambda r: r
+    )
+    loop.run_once()
+    clock.at += timedelta(minutes=10)
+    _drain(services)
+    with pytest.raises(ConfigError, match="runs no asset for lane"):
+        loop.run_once()
+    loop._controller._router = LaneRouter(frozenset())
+    report = loop.run_once()
+    assert report.tick.routed == 1
+    assert _routed_orders(services)

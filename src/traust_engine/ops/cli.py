@@ -27,7 +27,7 @@ from traust_core.v1.models.vocabulary import ActorKind
 
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
-from traust_engine.ops.runner import Runner
+from traust_engine.ops.runner import Runner, runnable
 from traust_engine.ops.shadow import (
     Diff,
     Tick,
@@ -134,7 +134,7 @@ def _diff(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     if args.routes:
         raw = json.loads(args.routes.read_text(encoding="utf-8"))
         rows = raw.get("decisions", []) if isinstance(raw, dict) else raw
-        lanes = (lane for a in pack.assets.values() for lane in a.trigger.lanes)
+        lanes = iter(pack.lanes)
         same, different = compare_routes(ticks, rows, repository_urls(services), lanes)
     report = Diff(
         since=since,
@@ -220,10 +220,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.models:
             core.register_model_catalog(args.models)
         pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
+        if args.op in ("run", "shadow", "claim"):
+            # preflight checks tool requirements against core's shipped pins
+            core.register_toolchain()
         if args.op in ("run", "shadow"):
+            if pack.route_on is not None and not args.router:
+                raise ConfigError(
+                    f"pack {pack.pack} sets route_on {pack.route_on}, but no --router was "
+                    "given -- pass --router module:Class, or drop route_on from the pack"
+                )
+            core.preflight(pack.requirements())
             return _passes(args, core, pack, shadow=args.op == "shadow")
-        ops = {"record": _record, "diff": _diff, "claim": _claim}
-        return ops[args.op](args, core, pack)
+        if args.op == "claim":
+            core.preflight(pack.assets[name].requires for name in runnable(pack))
+            return _claim(args, core, pack)
+        return {"record": _record, "diff": _diff}[args.op](args, core, pack)
     except (OSError, TraustError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2

@@ -47,7 +47,6 @@ class TickReport(Model):
     refused_again: int = 0
     stale: dict[AssetName, int] = pydantic.Field(default_factory=dict)
     overdue: dict[AssetName, int] = pydantic.Field(default_factory=dict)
-    unrunnable: tuple[AssetName, ...] = ()
 
 
 class Releases(Protocol):
@@ -99,15 +98,12 @@ class Controller(Generic[S]):
         """What a tick would plan (routed orders, then every due asset), and the stale-upstream
         stops it would record on the feed, writing nothing: the shadow run's view of the loop."""
         now = self._clock.now()
-        unrunnable = self._pack.unrunnable()
-        if unrunnable:
-            log.warning("not planned, no run or model.role: %s", ", ".join(unrunnable))
-        requests, routed, unrouted, refused_again = self._route(now, unrunnable)
+        requests, routed, unrouted, refused_again = self._route(now)
         planned, stale, stops = 0, {}, []
         for name in self._pack.topo_order():
             spec = self._pack.assets[name]
             since = spec.trigger.since(now)
-            if since is None or name in unrunnable:
+            if since is None or not spec.enabled:
                 continue
             subjects: Collection[UUID | None] = repositories if spec.partitions else (None,)
             busy = self._ops.subjects(name, OPEN_ORDER_STATES) | self._ops.subjects(
@@ -129,7 +125,7 @@ class Controller(Generic[S]):
                 planned += 1
         for name, count in stale.items():
             log.warning("%s: %d subjects wait on stale upstreams; not planned", name, count)
-        overdue = self._overdue(repositories, now, unrunnable)
+        overdue = self._overdue(repositories, now)
         report = TickReport(
             planned=planned,
             routed=routed,
@@ -137,7 +133,6 @@ class Controller(Generic[S]):
             refused_again=refused_again,
             stale=stale,
             overdue=overdue,
-            unrunnable=unrunnable,
         )
         return report, requests, stops
 
@@ -157,14 +152,12 @@ class Controller(Generic[S]):
             )
         return cache[dep]
 
-    def _overdue(
-        self, repositories: Collection[UUID], now: datetime, unrunnable: Collection[AssetName]
-    ) -> dict[AssetName, int]:
+    def _overdue(self, repositories: Collection[UUID], now: datetime) -> dict[AssetName, int]:
         """Subjects past `freshness.fail` since their last materialization (or never made);
-        unrunnable assets are reported as such instead."""
+        a disabled asset is not one the deployment is failing to keep fresh."""
         overdue = {}
         for name, spec in self._pack.assets.items():
-            if spec.freshness.fail is None or name in unrunnable:
+            if spec.freshness.fail is None or not spec.enabled:
                 continue
             subjects = set(repositories) if spec.partitions else {None}
             fresh = self._ops.subjects(name, MATERIALIZED, now - spec.freshness.fail)
@@ -173,16 +166,16 @@ class Controller(Generic[S]):
                 log.warning("%s: %d subjects past freshness.fail", name, count)
         return overdue
 
-    def _route(
-        self, now: datetime, unrunnable: Collection[AssetName]
-    ) -> tuple[list[OrderRequest], int, int, int]:
+    def _route(self, now: datetime) -> tuple[list[OrderRequest], int, int, int]:
         """Re-route repositories whose `route_on` asset materialized, whose routed order was
-        refused, or that a recorded release ships, since the last tick; each route with a lane the
-        pack runs becomes an order for that lane's asset, except a route back into a lane that
-        refused it."""
+        refused, or that a recorded release ships, since the last tick; each route with a lane
+        the pack runs becomes an order for that lane's asset, except a route back into a lane
+        that refused it. A lane the pack runs no asset for is a pack error: the pass fails
+        before it plans anything."""
         source = self._pack.route_on
         if self._router is None or self._state_of is None or source is None:
             return [], 0, 0, 0
+        before = self._cursor
         changed, refusals, releases = self._changes(source, now)
         requests: list[OrderRequest] = []
         unknown: set[LaneName] = set()
@@ -209,7 +202,7 @@ class Controller(Generic[S]):
                 except ConfigError:
                     unknown.add(route.lane)
                     continue
-                if asset not in unrunnable:
+                if self._pack.assets[asset].enabled:
                     requests.append(
                         OrderRequest(
                             asset=asset,
@@ -221,7 +214,11 @@ class Controller(Generic[S]):
                     )
             routed += 1
         if unknown:
-            log.warning("routed lanes no pack asset runs: %s", ", ".join(sorted(unknown)))
+            self._cursor = before
+            raise ConfigError(
+                f"pack {self._pack.pack} runs no asset for lane(s) {', '.join(sorted(unknown))}: "
+                "give each lane an asset (trigger.lanes), or fix the router"
+            )
         return requests, routed, unrouted, refused_again
 
     def _changes(

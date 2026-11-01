@@ -16,7 +16,7 @@ from traust_core.v1.errors import ConfigError, DocumentError
 from traust_core.v1.models.base import Dto
 from traust_core.v1.models.common import Sha256
 from traust_core.v1.models.integrity import sha256_hex
-from traust_core.v1.models.operations import AssetName, ConfigDigest, LaneName
+from traust_core.v1.models.operations import AssetName, ConfigDigest, LaneName, Requirement
 
 from traust_engine.ops.cron import Cron
 
@@ -85,6 +85,8 @@ class ModelRole(Dto):
 class AssetSpec(Dto):
     run: tuple[str, ...] = ()
     model: ModelRole | None = None
+    enabled: bool = True
+    requires: Requirement = Requirement()
     partitions: Literal["dynamic:repo"] | None = None
     deps: tuple[AssetName, ...] = ()
     priority: int = 100
@@ -97,6 +99,12 @@ class Pack(Dto):
     pack: str
     route_on: AssetName | None = None
     assets: dict[AssetName, AssetSpec]
+
+    @property
+    def lanes(self) -> tuple[LaneName, ...]:
+        """The lanes the pack actually runs: an enabled asset's, never a disabled one's."""
+        return tuple(lane for a in self.assets.values() if a.enabled for lane in a.trigger.lanes)
+
     digest: Sha256 | None = None  # sha256 of the file's bytes, set by `load`: the pack version
     pins: tuple[ConfigDigest, ...] = ()
 
@@ -108,6 +116,28 @@ class Pack(Dto):
         lanes = [lane for a in self.assets.values() for lane in a.trigger.lanes]
         if len(lanes) != len(set(lanes)):
             raise ValueError(f"a lane belongs to one asset: {sorted(lanes)}")
+        if unmade := sorted(
+            n for n, a in self.assets.items() if a.enabled and not a.run and a.model is None
+        ):
+            raise ValueError(
+                f"assets with neither run nor model.role: {unmade} -- no runner can make them "
+                "(enabled: false is the exemption)"
+            )
+        if self.route_on is not None and not self.assets[self.route_on].enabled:
+            raise ValueError(f"route_on {self.route_on!r} is disabled: routing would never run")
+        if stalled := sorted(
+            {
+                d
+                for a in self.assets.values()
+                if a.enabled
+                for d in a.deps
+                if not self.assets[d].enabled
+            }
+        ):
+            raise ValueError(
+                f"enabled assets depend on disabled ones: {stalled} -- the dependents are "
+                "withheld upstream-stale every window; enable the dependency or the dependent"
+            )
         if self.route_on is not None and (
             self.route_on not in names or self.assets[self.route_on].trigger.every is None
         ):
@@ -118,9 +148,10 @@ class Pack(Dto):
             raise ValueError(f"asset deps form a cycle: {e.args[1]}") from e
         return self
 
-    def unrunnable(self) -> tuple[AssetName, ...]:
-        """Assets with neither a command nor a model role: no runner could claim their orders."""
-        return tuple(n for n, a in self.assets.items() if not a.run and a.model is None)
+    def requirements(self) -> tuple[Requirement, ...]:
+        """Each enabled asset's requirements, what `Context.preflight` checks before a pass;
+        `enabled: false` is the only exemption."""
+        return tuple(a.requires for a in self.assets.values() if a.enabled)
 
     def topo_order(self) -> list[AssetName]:
         return list(TopologicalSorter({n: a.deps for n, a in self.assets.items()}).static_order())
