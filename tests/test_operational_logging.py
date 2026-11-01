@@ -4,6 +4,8 @@ import json
 import shutil
 import subprocess
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -436,6 +438,43 @@ def test_failed_tick_output_does_not_log_completion(
     assert SECRET not in capsys.readouterr().err
     ticks = [row for row in _rows(log_file) if row["operation"] == "engine.tick"]
     assert [(row["outcome"], row["reason"]) for row in ticks] == [("failed", "tick_error")]
+    assert SECRET not in log_file.read_text()
+
+
+@pytest.mark.parametrize("operation", ["run", "shadow"])
+def test_observation_cleanup_failure_is_bounded_and_nonzero(
+    operation: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    log_file = tmp_path / "cleanup.log"
+    core_file = _core_file(tmp_path, log_file)
+    original = Context.repository_observation
+
+    @contextmanager
+    def fail_on_exit(core: Context) -> Iterator[Any]:
+        with original(core) as observation:
+            yield observation
+        raise RuntimeError(SECRET)
+
+    monkeypatch.setattr(Context, "repository_observation", fail_on_exit)
+    assert (
+        cli.main(
+            [operation, "--once", "--core", str(core_file), "--pack", str(_pass_pack(tmp_path))]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "ERROR: tick failed (RuntimeError)" in captured.err
+    assert SECRET not in captured.err and "Traceback" not in captured.err
+    cleanup = [row for row in _rows(log_file) if row["operation"] == "engine.observation"]
+    assert len(cleanup) == 1
+    assert (cleanup[0]["outcome"], cleanup[0]["reason"], cleanup[0]["error_type"]) == (
+        "failed",
+        "cleanup_error",
+        "RuntimeError",
+    )
     assert SECRET not in log_file.read_text()
 
 

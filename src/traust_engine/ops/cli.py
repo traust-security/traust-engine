@@ -322,6 +322,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         _error("startup", error)
         return 2
 
+    opened = perf_counter()
+    try:
+        return _run_with_stack(args, core)
+    except Exception as error:
+        with correlation_scope(_request_id("shutdown"), actor_kind=ActorKind.MACHINE):
+            _debug_failure(error)
+            lifecycle(
+                log,
+                "observation",
+                "failed",
+                started=opened,
+                reason="cleanup_error",
+                error_type=type(error).__name__,
+            )
+            _error("tick", error)
+        return 2
+
+
+def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
     with ExitStack() as stack:
         with correlation_scope(_request_id("startup"), actor_kind=ActorKind.MACHINE):
             started = perf_counter()
