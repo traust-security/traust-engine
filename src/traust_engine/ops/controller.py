@@ -176,9 +176,13 @@ class Controller(Generic[S]):
         source = self._pack.route_on
         if self._router is None or self._state_of is None or source is None:
             return [], 0, 0, 0
+        if self._cursor is None:
+            since = self._pack.assets[source].trigger.since(now) or now
+            last = self._ops.last_routed()
+            self._cursor = encode_cursor(since if last is None else max(last, since), UUID(int=0))
         before = self._cursor
         try:
-            changed, refusals, releases = self._changes(source, now)
+            changed, refusals, releases = self._changes(source)
             requests: list[OrderRequest] = []
             unknown: set[LaneName] = set()
             routed = unrouted = refused_again = 0
@@ -223,17 +227,13 @@ class Controller(Generic[S]):
             raise
 
     def _changes(
-        self, source: AssetName, now: datetime
+        self, source: AssetName
     ) -> tuple[set[UUID], dict[UUID, list[Refusal]], dict[UUID, list[RecordedRelease]]]:
         """Repositories whose `source` materialized, refusals of routed orders, and recorded
         releases by the repositories they ship, on the feed since the routing cursor, which moves
         past them. After a restart the cursor starts at the last routed order, looking back at
         most one `source` cadence."""
         assert self._feed is not None and self._portfolio is not None
-        if self._cursor is None:
-            since = self._pack.assets[source].trigger.since(now) or now
-            last = self._ops.last_routed()
-            self._cursor = encode_cursor(since if last is None else max(last, since), UUID(int=0))
         changed: set[UUID] = set()
         refusals: defaultdict[UUID, list[Refusal]] = defaultdict(list)
         releases: defaultdict[UUID, list[RecordedRelease]] = defaultdict(list)

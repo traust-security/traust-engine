@@ -17,7 +17,7 @@ from traust_core.v1.context import Config, Context
 from traust_core.v1.context.context import Services
 from traust_core.v1.errors import ConfigError, NotFoundError, TraustError
 from traust_core.v1.models.artifacts import RunManifestArtifact
-from traust_core.v1.models.common import every_item
+from traust_core.v1.models.common import PageRequest, every_item
 from traust_core.v1.models.inventory import (
     ProductSlug,
     RecordedRelease,
@@ -850,6 +850,37 @@ def test_routing_retries_source_event_after_state_read_failure(tmp_path: Path) -
     )
     with pytest.raises(TraustError, match="transient observation read failure"):
         controller.tick([repo])
+
+    assert controller.tick([repo]).routed == 1
+    assert _routed_orders(services) == [("diff_scan", "diff-scan", "rule-4", repo)]
+
+
+def test_delayed_routing_retry_retains_initial_feed_boundary(tmp_path: Path) -> None:
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    (repo,) = _repositories(services, 1)
+    _materialize(services, "repo_state", repo)
+    clock.at = services.feed.list(PageRequest()).items[-1].position[0]
+    pack = Pack.load(PACK)
+    assert pack.route_on is not None
+    cadence = pack.assets[pack.route_on].trigger.every
+    assert cadence is not None
+    attempts = 0
+
+    def state_of(repository_id: UUID) -> UUID:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TraustError("transient observation read failure")
+        return repository_id
+
+    controller = Controller(
+        pack, services.ops, clock, LaneRouter(), state_of, services.feed, services.portfolio
+    )
+    with pytest.raises(TraustError, match="transient observation read failure"):
+        controller.tick([repo])
+
+    clock.at += cadence + timedelta(seconds=1)
 
     assert controller.tick([repo]).routed == 1
     assert _routed_orders(services) == [("diff_scan", "diff-scan", "rule-4", repo)]
