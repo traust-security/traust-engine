@@ -293,6 +293,17 @@ class Runner:
                     error_type=type(error).__name__,
                 )
                 return
+            except Exception as error:
+                # a failed renewal is transient: only a lost lease stops renewal, or the
+                # lease lapses while the command runs and the order is re-run
+                lifecycle(
+                    log,
+                    "heartbeat",
+                    "failed",
+                    started=started,
+                    reason="heartbeat_error",
+                    error_type=type(error).__name__,
+                )
 
 
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:

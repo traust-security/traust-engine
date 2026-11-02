@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -259,6 +260,29 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
     assert beats and all(b[0] == queued.id and b[1] == WORKER for b in beats)
+
+
+def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
+    """A failed renewal is transient (a locked database, say): renewal continues, or the
+    lease lapses while the command still runs and another runner re-runs the order."""
+    queued = _submit(context, "feeds_cache")
+    beats: list[Any] = []
+    services = context.services()
+    real = services.ops.heartbeat
+
+    def flaky(*args: Any) -> RunOrder:
+        beats.append(args)
+        if len(beats) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args)
+
+    services.ops.heartbeat = flaky  # type: ignore[method-assign]
+    runner = Runner(
+        services, Pack.load(PACK), WORKER, timedelta(seconds=0.3), HOSTS, Commands(delay=0.5)
+    )
+    done = runner.claim_once()
+    assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
+    assert len(beats) >= 2 and all(b[0] == queued.id and b[1] == WORKER for b in beats)
 
 
 def test_claim_from_the_cli_runs_one_order_and_exits_with_its_outcome(
