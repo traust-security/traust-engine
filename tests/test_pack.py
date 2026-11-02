@@ -155,3 +155,12 @@ def test_the_packs_lanes_are_the_enabled_assets_lanes() -> None:
         lane for a in [raw["assets"]["diff_scan"]] for lane in a["trigger"]["lanes"]
     }
     assert set(disabled) >= set(Pack.model_validate(raw).lanes)
+
+
+def test_unknown_route_source_is_reported_as_config_error(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "pack: p\nroute_on: missing\nassets:\n  a: {run: [materialize], trigger: {every: 24h}}\n",
+    )
+    with pytest.raises(ConfigError, match="route_on 'missing' must be an asset"):
+        Pack.load(path)

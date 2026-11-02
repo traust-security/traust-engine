@@ -123,6 +123,10 @@ class Pack(Dto):
                 f"assets with neither run nor model.role: {unmade} -- no runner can make them "
                 "(enabled: false is the exemption)"
             )
+        if self.route_on is not None and (
+            self.route_on not in names or self.assets[self.route_on].trigger.every is None
+        ):
+            raise ValueError(f"route_on {self.route_on!r} must be an asset with trigger.every")
         if self.route_on is not None and not self.assets[self.route_on].enabled:
             raise ValueError(f"route_on {self.route_on!r} is disabled: routing would never run")
         if stalled := sorted(
@@ -138,10 +142,6 @@ class Pack(Dto):
                 f"enabled assets depend on disabled ones: {stalled} -- the dependents are "
                 "withheld upstream-stale every window; enable the dependency or the dependent"
             )
-        if self.route_on is not None and (
-            self.route_on not in names or self.assets[self.route_on].trigger.every is None
-        ):
-            raise ValueError(f"route_on {self.route_on!r} must be an asset with trigger.every")
         try:
             self.topo_order()
         except CycleError as e:
