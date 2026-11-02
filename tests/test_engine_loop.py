@@ -853,3 +853,23 @@ def test_routing_retries_source_event_after_state_read_failure(tmp_path: Path) -
 
     assert controller.tick([repo]).routed == 1
     assert _routed_orders(services) == [("diff_scan", "diff-scan", "rule-4", repo)]
+
+
+def test_pending_order_is_not_admitted_after_asset_is_disabled(tmp_path: Path) -> None:
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    (repo,) = _repositories(services, 1)
+    order = services.ops.plan(
+        OrderRequest(asset="diff_scan", priority=1, repository_id=repo, lane="diff-scan"),
+        ENGINE,
+    )
+    assert order.id is not None
+    assert order.state == OrderState.PLANNED
+    pack = _pack(tmp_path, diff_scan={"enabled": False})
+
+    report = EngineLoop(services, clock, pack).run_once()
+
+    withheld = services.ops.get(order.id)
+    assert report.admission.withheld == 1
+    assert withheld.state == OrderState.WITHHELD
+    assert withheld.reason == "asset-not-in-pack"
