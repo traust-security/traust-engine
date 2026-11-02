@@ -15,7 +15,7 @@ import pytest
 import yaml
 from traust_core.v1.context import Config, Context
 from traust_core.v1.context.context import Services
-from traust_core.v1.errors import ConfigError, NotFoundError
+from traust_core.v1.errors import ConfigError, NotFoundError, TraustError
 from traust_core.v1.models.artifacts import RunManifestArtifact
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.inventory import (
@@ -823,3 +823,33 @@ def test_a_corrected_router_retry_reads_the_events_it_failed_on(tmp_path: Path) 
     report = loop.run_once()
     assert report.tick.routed == 1
     assert _routed_orders(services)
+
+
+def test_routing_retries_source_event_after_state_read_failure(tmp_path: Path) -> None:
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    (repo,) = _repositories(services, 1)
+    _materialize(services, "repo_state", repo)
+    attempts = 0
+
+    def state_of(repository_id: UUID) -> UUID:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise TraustError("transient observation read failure")
+        return repository_id
+
+    controller = Controller(
+        Pack.load(PACK),
+        services.ops,
+        clock,
+        LaneRouter(),
+        state_of,
+        services.feed,
+        services.portfolio,
+    )
+    with pytest.raises(TraustError, match="transient observation read failure"):
+        controller.tick([repo])
+
+    assert controller.tick([repo]).routed == 1
+    assert _routed_orders(services) == [("diff_scan", "diff-scan", "rule-4", repo)]
