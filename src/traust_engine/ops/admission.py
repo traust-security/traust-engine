@@ -70,7 +70,7 @@ class Admission:
         for order in sorted(planned, key=lambda o: (o.priority, o.created_at)):
             asset = AssetName(order.asset)
             spec = self._pack.assets.get(asset)
-            if spec is None:
+            if spec is None or not spec.enabled:
                 self._ops.withhold(order.id, OrderReason.ASSET_NOT_IN_PACK)
                 report["withheld"] += 1
                 continue
