@@ -24,17 +24,14 @@ from traust_core.v1.models.operations import (
     OPEN_ORDER_STATES,
     AssetName,
     JobResult,
-    LaneName,
     OrderFilter,
     OrderReason,
-    OrderRequest,
     OrderState,
     RunOrder,
     WorkerId,
 )
 from traust_core.v1.models.values import HttpsRepoUrl
 
-from traust_engine.ops.controller import ENGINE
 from traust_engine.ops.events import execution_scope, lifecycle
 from traust_engine.ops.pack import AssetSpec, Pack
 
@@ -249,8 +246,8 @@ class Runner:
         }
         if queued[0].repository_id not in held:
             return ops.claim(self._worker, self._lease_for, assets)
-        # `start` leases a pair's open order, whatever its state, so only a pair with no other
-        # open order can be taken over without leasing a planned or already-leased one.
+        # only a free pair is taken over: an order at its budget gate (planned) or already
+        # leased keeps its queued sibling waiting, whatever runner holds it.
         busy = {(o.asset, o.repository_id) for o in open_orders if o.state != OrderState.QUEUED}
         for order in queued:
             if order.repository_id not in held and (order.asset, order.repository_id) not in busy:
@@ -260,20 +257,12 @@ class Runner:
         return None
 
     def _take(self, order: RunOrder) -> RunOrder | None:
-        """Lease this queued order; None when another runner leased it first."""
-        request = OrderRequest(
-            asset=AssetName(order.asset),
-            priority=order.priority,
-            repository_id=order.repository_id,
-            run_batch_id=order.run_batch_id,
-            lane=LaneName(order.lane) if order.lane is not None else None,
-            rule=order.rule,
-            event_source=order.event_source,
+        """Lease exactly this queued order; None when another runner leased or completed it
+        first — never re-created, or finished work would run a second time."""
+        assert order.id is not None
+        return self._services.ops.claim(
+            self._worker, self._lease_for, {AssetName(order.asset)}, order_id=order.id
         )
-        try:
-            return self._services.ops.start(request, ENGINE, self._worker, self._lease_for)
-        except ConflictError:
-            return None
 
     def _values(self, order: RunOrder, spec: AssetSpec) -> dict[str, str]:
         """What the order supplies: its id, the asset's model role, the rule that routed it, and
