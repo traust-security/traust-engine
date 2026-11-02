@@ -340,6 +340,18 @@ def test_diff_ignores_expected_routes_to_a_disabled_assets_lane(core: Path, tmp_
     assert rc == 0 and json.loads(out)["routes_different"] == []
 
 
+def test_diff_rejects_a_routes_document_without_decisions(core: Path, tmp_path: Path) -> None:
+    """An object without a decisions key must not read as an empty routing: every expected
+    row would be dropped and the diff report a clean bill on a comparison that never ran."""
+    shadow = tmp_path / "shadow.jsonl"
+    shadow.write_text(_tick(datetime.now(UTC) - 3 * HOUR).model_dump_json())
+    routes = tmp_path / "worklist.json"
+    routes.write_text(
+        json.dumps({"rows": [{"repo_url": "https://github.com/org/app", "lane": "diff-scan"}]})
+    )
+    assert _cli(core, "diff", "--shadow", str(shadow), "--routes", str(routes))[0] == 2
+
+
 def test_a_router_that_cannot_be_imported_is_a_config_error(core: Path) -> None:
     assert _cli(core, "shadow", "--once", "--router", "no.such.module:Router")[0] == 2
 
