@@ -45,7 +45,7 @@ when they need the continuous-ops service.
 | `reporting`, `compliance`, metrics journal, model registry | Core's `reporting`, `compliance`, `spend` and `insight` services; `Context.register_model_catalog` registers model pricing. Views/exports replace legacy journal/dashboard files, not their file formats. |
 | Bundled `data/secure-code-audit/` rule packs | The harness's `packs/security/detection/` owns the rule packs. Install the harness pack and configure it through core; the engine wheel no longer supplies it. |
 | Engine extras `graph`, `signing`, `postgres`, `ledger-migration`, `remote`, `s3`, `gcs` | These extras are removed. Select database/provider dependencies in the core deployment; installing an old engine extra no longer enables the feature. |
-| `$TRAUST_CONFIG_HOME` plus `locations.yaml` and per-feature configuration files | Pass a separate core file (for example, `core.yaml`) explicitly with `--core`; it uses `traust.yaml` format, sets `home:` to the deployment home, and contains inline `locations:` resolved beside that file. Use `traust config migrate <old-home>` for old configuration homes. Tool pins, safe-exec profiles and the feeds registry ship with core; `--pin`, `--feeds` and `--models` remain available on the engine CLI. |
+| `$TRAUST_CONFIG_HOME` plus `locations.yaml` and per-feature configuration files | Pass a separate core file (for example, `core.yaml`) explicitly with `--core`; it uses `traust.yaml` format, sets `home:` to the deployment home, and contains inline `locations:` resolved beside that file. Use `traust config migrate <old-home>` for old configuration homes. Core ships the stock tool pins, safe-exec profiles and feeds registry, but a feed-backed pack must still pass its registry path with `--feeds`; the engine registers those feeds with core and pins the registry into the run manifest. `--pin` and `--models` are also available on the engine CLI. |
 
 Only core's public `context`, `models` and `errors` modules are consumer APIs; do not
 replace removed engine imports with core provider/repository internals. See
@@ -97,9 +97,11 @@ Everything the service needs comes from its arguments: `--core` (a separate `cor
 file in `traust.yaml` format, with `home:` set to the deployment home and inline
 `locations:` resolved beside the file), `--pack` (the pack's `assets.yaml`), and
 optionally `--pin`, `--feeds` and `--models`. Without an explicit `home:`, core defaults
-to `~/.traust`.
-The harness documents deployment configuration; core supplies its tool pins,
-safe-exec profiles and feeds registry.
+to `~/.traust`. For feed-backed packs, pass the feeds registry path with `--feeds`;
+the engine registers that registry with core and pins it into the run manifest. Without
+`--feeds`, feed requirements are not registered, even though core ships a stock registry.
+The harness documents deployment configuration; core owns and ships the stock tool pins,
+safe-exec profiles and feeds registry, while runtime feed registration is explicit.
 
 ## Development
 
