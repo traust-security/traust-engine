@@ -32,6 +32,7 @@ from traust_core.v1.models.operations import (
 )
 from traust_core.v1.models.values import HttpsRepoUrl
 
+from traust_engine.ops.completion import complete
 from traust_engine.ops.events import execution_scope, lifecycle
 from traust_engine.ops.pack import AssetSpec, Pack
 
@@ -187,32 +188,16 @@ class Runner:
         returncode: int | None = None,
         error_type: str | None = None,
     ) -> RunOrder:
-        try:
-            completed = self._services.ops.complete(order_id, self._worker, result)
-        except Exception as error:
-            lifecycle(
-                log,
-                "execution",
-                "failed",
-                started=started,
-                reason="completion_error",
-                returncode=returncode,
-                error_type=type(error).__name__,
-            )
-            raise
-        state = str(completed.state)
-        lifecycle(
+        return complete(
+            self._services.ops,
             log,
-            "execution",
-            state,
-            started=started,
-            level=logging.INFO if completed.state is OrderState.SUCCEEDED else logging.WARNING,
-            reason=str(result.reason) if result.reason is not None else None,
-            status=state,
+            order_id,
+            self._worker,
+            result,
+            started,
             returncode=returncode,
             error_type=error_type,
         )
-        return completed
 
     def _lease(self) -> RunOrder | None:
         """Lease the next queued order of an asset this runner makes, most important first. A

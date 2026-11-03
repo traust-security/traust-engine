@@ -6,6 +6,33 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# A hook inherits this repository's Git environment. Tests that initialize another
+# repository must not reinitialize this one (or its linked worktree's shared config).
+if ! local_env="$(git rev-parse --local-env-vars 2>/dev/null)" || [[ -z "$local_env" ]]; then
+  # Keep in sync with Git's local_repo_env table used by rev-parse --local-env-vars.
+  local_env="
+GIT_ALTERNATE_OBJECT_DIRECTORIES
+GIT_CONFIG
+GIT_CONFIG_PARAMETERS
+GIT_CONFIG_COUNT
+GIT_OBJECT_DIRECTORY
+GIT_DIR
+GIT_WORK_TREE
+GIT_IMPLICIT_WORK_TREE
+GIT_GRAFT_FILE
+GIT_INDEX_FILE
+GIT_NO_REPLACE_OBJECTS
+GIT_REPLACE_REF_BASE
+GIT_PREFIX
+GIT_SHALLOW_FILE
+GIT_COMMON_DIR"
+fi
+local_env_vars=()
+while IFS= read -r name; do
+  [[ -z "$name" ]] || local_env_vars+=("$name")
+done <<< "$local_env"
+unset "${local_env_vars[@]}"
+
 if ! command -v uv >/dev/null 2>&1; then
   echo "pre-push: uv not found — install uv, then run: make setup" >&2
   exit 1
