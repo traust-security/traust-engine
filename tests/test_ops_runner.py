@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -21,12 +22,14 @@ from uuid import UUID
 import pytest
 import yaml
 from traust_core.v1.context import Config, Context
+from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import (
     JobResult,
     LaneName,
     ModelName,
     ModelUsage,
+    OrderFilter,
     OrderRequest,
     OrderState,
     ProviderName,
@@ -257,6 +260,29 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
     assert beats and all(b[0] == queued.id and b[1] == WORKER for b in beats)
+
+
+def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
+    """A failed renewal is transient (a locked database, say): renewal continues, or the
+    lease lapses while the command still runs and another runner re-runs the order."""
+    queued = _submit(context, "feeds_cache")
+    beats: list[Any] = []
+    services = context.services()
+    real = services.ops.heartbeat
+
+    def flaky(*args: Any) -> RunOrder:
+        beats.append(args)
+        if len(beats) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args)
+
+    services.ops.heartbeat = flaky  # type: ignore[method-assign]
+    runner = Runner(
+        services, Pack.load(PACK), WORKER, timedelta(seconds=0.3), HOSTS, Commands(delay=0.5)
+    )
+    done = runner.claim_once()
+    assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
+    assert len(beats) >= 2 and all(b[0] == queued.id and b[1] == WORKER for b in beats)
 
 
 def test_claim_from_the_cli_runs_one_order_and_exits_with_its_outcome(
@@ -517,3 +543,36 @@ def test_a_pair_still_waiting_for_admission_is_not_taken_over(context: Context) 
     assert _runner(context, commands, worker=WorkerId("b")).claim_once() is None
     assert commands.seen == []
     assert context.services().ops.get(planned.id).state == OrderState.PLANNED
+
+
+def test_a_takeover_does_not_recreate_an_order_completed_mid_listing(context: Context) -> None:
+    """An order completed by another runner between the listing and the takeover must not be
+    re-created and re-run: `start` would store a fresh leased order for its pair."""
+    app, other = _repository(context), _repository(context, "example/other")
+    held = _order(context, "repo_state", app, priority=0)
+    waiting = _order(context, "diff_scan", app, priority=1)  # the top queued order
+    victim = _order(context, "repo_state", other, priority=2)
+    _hold(context, held, "a")
+    services = context.services()
+    real_list = services.ops.list
+    raced = False
+
+    def list_then_complete(filter: OrderFilter, page: Any) -> Any:
+        out = real_list(filter, page)
+        nonlocal raced
+        if not raced and any(o.id == victim.id for o in out.items):
+            raced = True  # another runner claims and completes it after our listing saw it
+            services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
+            services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
+        return out
+
+    services.ops.list = list_then_complete  # type: ignore[method-assign]
+    commands = Commands()
+    done = Runner(
+        services, Pack.load(PACK), WorkerId("b"), timedelta(minutes=5), HOSTS, commands
+    ).claim_once()
+    assert done is None
+    assert commands.seen == []
+    remaining = list(every_item(lambda p: real_list(OrderFilter(states=tuple(OrderState)), p)))
+    assert {o.id for o in remaining} == {held.id, waiting.id, victim.id}
+    assert services.ops.get(victim.id).state == OrderState.SUCCEEDED

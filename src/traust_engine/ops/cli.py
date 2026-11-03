@@ -204,7 +204,9 @@ def _diff(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     same, different = 0, []
     if args.routes:
         raw = json.loads(args.routes.read_text(encoding="utf-8"))
-        rows = raw.get("decisions", []) if isinstance(raw, dict) else raw
+        rows = raw.get("decisions") if isinstance(raw, dict) else raw
+        if not isinstance(rows, list):
+            raise ConfigError(f"{args.routes}: a list of rows, or an object with a decisions key")
         lanes = iter(pack.lanes)
         same, different = compare_routes(ticks, rows, repository_urls(services), lanes)
     report = Diff(
