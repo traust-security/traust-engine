@@ -21,11 +21,11 @@ from traust_core.v1.models.operations import (
     JobResult,
     OrderFilter,
     OrderRequest,
-    OrderState,
     RunOrder,
     WorkerId,
 )
 
+from traust_engine.ops.completion import complete
 from traust_engine.ops.events import execution_scope, lifecycle
 from traust_engine.ops.runner import CRASHED, outcome
 
@@ -88,43 +88,6 @@ class Diff(Model):
         return len(self.missed) + len(self.early) + len(self.routes_different)
 
 
-def _complete(
-    services: Services,
-    order_id: UUID,
-    worker: WorkerId,
-    result: JobResult,
-    started: float,
-    *,
-    returncode: int | None = None,
-    error_type: str | None = None,
-) -> RunOrder:
-    try:
-        completed = services.ops.complete(order_id, worker, result)
-    except Exception as error:
-        lifecycle(
-            log,
-            "execution",
-            "failed",
-            started=started,
-            reason="completion_error",
-            returncode=returncode,
-            error_type=type(error).__name__,
-        )
-        raise
-    lifecycle(
-        log,
-        "execution",
-        str(completed.state),
-        started=started,
-        level=logging.INFO if completed.state is OrderState.SUCCEEDED else logging.WARNING,
-        reason=str(result.reason) if result.reason is not None else None,
-        status=str(completed.state),
-        returncode=returncode,
-        error_type=error_type,
-    )
-    return completed
-
-
 def record(
     services: Services,
     request: OrderRequest,
@@ -140,8 +103,9 @@ def record(
         try:
             done = subprocess.run(list(argv), capture_output=True, text=True, check=False)
         except OSError as error:
-            _complete(
-                services,
+            complete(
+                services.ops,
+                log,
                 order.id,
                 worker,
                 JobResult.failed(CRASHED),
@@ -160,8 +124,9 @@ def record(
             )
             raise
         result = outcome(done)
-        completed = _complete(
-            services,
+        completed = complete(
+            services.ops,
+            log,
             order.id,
             worker,
             result,

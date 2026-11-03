@@ -6,6 +6,11 @@ set -euo pipefail
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# A hook inherits this repository's Git environment. Tests that initialize another
+# repository must not reinitialize this one (or its linked worktree's shared config).
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 if ! command -v uv >/dev/null 2>&1; then
   echo "pre-push: uv not found — install uv, then run: make setup" >&2
   exit 1

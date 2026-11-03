@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -891,6 +891,7 @@ name = "traust-engine"
 version = "0.40.0"
 source = { editable = "." }
 dependencies = [
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "traust-core" },
 ]
@@ -905,6 +906,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "pydantic" },
     { name = "pyyaml" },
     { name = "traust-core", git = "https://github.com/traust-security/traust-core.git?rev=e01d420262641615427ecb537a14380c90442219" },
 ]
