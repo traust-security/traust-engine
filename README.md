@@ -11,10 +11,12 @@ persistence, tools and reporting belong to traust-core. Import as `traust_engine
 | `traust_engine.ops` | Continuous ops: `Pack` (the pack's `assets.yaml`, checked against contracts `config/v1/pack`), the tick, admission and the reaper (`EngineLoop.run_once`), all through traust-core services |
 
 This library ships **no configuration files and never loads config itself.**
-The service entry point (`traust-engine run|shadow|record|diff|claim --core <traust.yaml>
+The service entry point (`traust-engine run|shadow|record|diff|claim --core <core.yaml>
 --pack <assets.yaml>`) builds traust-core's `Context` once from the files it is given and
-passes core's services in; everything below it takes already-resolved arguments. Config
-resolution (`traust.yaml`, including its `locations:` section) belongs to traust-core's `Context`.
+passes core's services in; everything below it takes already-resolved arguments. `--core`
+takes a separate core configuration file in `traust.yaml` format, not the `traust.yaml` in
+an old configuration home. Set its `home:` to the deployment home (otherwise core defaults
+to `~/.traust`); inline `locations:` are resolved relative to `core.yaml` by traust-core.
 The engine imports only traust-core's public API: `traust_core.v1.context`, `models` and
 `errors` (the consumer ratchet in CI holds it there).
 
@@ -33,7 +35,7 @@ when they need the continuous-ops service.
 
 | Previous API, input or output | Replacement / migration action |
 |---|---|
-| `from traust_engine import HarnessEngine`; `HarnessEngine.load(config_home=...)` | `from traust_core.v1.context import Context`; `Context.from_file(Path("traust.yaml"))`, then `context.services()`. For scheduling, use `traust-engine run\|shadow\|record\|diff\|claim --core traust.yaml --pack assets.yaml`. |
+| `from traust_engine import HarnessEngine`; `HarnessEngine.load(config_home=...)` | `from traust_core.v1.context import Context`; `Context.from_file(Path("core.yaml"))`, then `context.services()`. For scheduling, use `traust-engine run\|shadow\|record\|diff\|claim --core core.yaml --pack assets.yaml`; `core.yaml` is separate from the old config-home `traust.yaml` and sets `home:` to the deployment home. |
 | `corpus`, finding identity/disposition, `ledger`, file-backed findings projections | Core's `findings`, `assessment`, `artifacts` and optional `ledger` services. Existing files/ledger layers are not imported automatically; legacy-data migration and cutover are separate work. |
 | `adapters`, `_util.safe_exec`, `toolchain` | Core's provider catalog and code-facts/validation services, configured through `Context`; use the corresponding `traust` scanner commands. Engine-internal adapter imports are no longer supported. |
 | `impact`, `osv`, `depsdev`, `applicability` | Core's `exposure` and `below_range` services and `traust impact` commands. The portfolio graph is replaced by recorded inventory/SBOMs, so unmeasured dependencies require SBOM ingestion. |
@@ -43,7 +45,7 @@ when they need the continuous-ops service.
 | `reporting`, `compliance`, metrics journal, model registry | Core's `reporting`, `compliance`, `spend` and `insight` services; `Context.register_model_catalog` registers model pricing. Views/exports replace legacy journal/dashboard files, not their file formats. |
 | Bundled `data/secure-code-audit/` rule packs | The harness's `packs/security/detection/` owns the rule packs. Install the harness pack and configure it through core; the engine wheel no longer supplies it. |
 | Engine extras `graph`, `signing`, `postgres`, `ledger-migration`, `remote`, `s3`, `gcs` | These extras are removed. Select database/provider dependencies in the core deployment; installing an old engine extra no longer enables the feature. |
-| `$TRAUST_CONFIG_HOME` plus `locations.yaml` and per-feature configuration files | Pass the core configuration file explicitly with `--core`; locations are inline in `traust.yaml`. Use `traust config migrate <old-home>` for old configuration homes. Tool pins, safe-exec profiles and the feeds registry ship with core; `--pin`, `--feeds` and `--models` remain available on the engine CLI. |
+| `$TRAUST_CONFIG_HOME` plus `locations.yaml` and per-feature configuration files | Pass a separate core file (for example, `core.yaml`) explicitly with `--core`; it uses `traust.yaml` format, sets `home:` to the deployment home, and contains inline `locations:` resolved beside that file. Use `traust config migrate <old-home>` for old configuration homes. Tool pins, safe-exec profiles and the feeds registry ship with core; `--pin`, `--feeds` and `--models` remain available on the engine CLI. |
 
 Only core's public `context`, `models` and `errors` modules are consumer APIs; do not
 replace removed engine imports with core provider/repository internals. See
@@ -91,9 +93,11 @@ the latest tag.
 
 ## Runtime configuration
 
-Everything the service needs comes from its arguments: `--core` (the core
-configuration in `traust.yaml` format, including inline `locations:`),
-`--pack` (the pack's `assets.yaml`), and optionally `--pin`, `--feeds` and `--models`.
+Everything the service needs comes from its arguments: `--core` (a separate `core.yaml`
+file in `traust.yaml` format, with `home:` set to the deployment home and inline
+`locations:` resolved beside the file), `--pack` (the pack's `assets.yaml`), and
+optionally `--pin`, `--feeds` and `--models`. Without an explicit `home:`, core defaults
+to `~/.traust`.
 The harness documents deployment configuration; core supplies its tool pins,
 safe-exec profiles and feeds registry.
 

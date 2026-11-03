@@ -235,7 +235,12 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--core", type=Path, required=True, help="traust-core's core.yaml")
+    common.add_argument(
+        "--core",
+        type=Path,
+        required=True,
+        help="separate traust.yaml-format core file; set home: to the deployment home",
+    )
     common.add_argument("--pack", type=Path, required=True, help="the pack's assets.yaml")
     common.add_argument(
         "--pin", type=Path, action="append", default=[], help="pinned config for run manifests"
