@@ -1,0 +1,8 @@
+# Keep the build context to what the image build reads: dependency manifests,
+# the installed source tree, and the license. Tests, docs, caches, and
+# agent/tooling state never enter the image.
+*
+!src
+!LICENSE
+!pyproject.toml
+!uv.lock
