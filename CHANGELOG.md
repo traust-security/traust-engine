@@ -2,6 +2,16 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.41.0]
+
+- Add the fourth work trigger: remediation-driven dispatch. The engine reads the ops feed
+  for remediation assessments and finished remediation runs, asks core's remediation
+  scheduling service for current state, and plans the remediation order for a request the
+  scheduling door left without one, the verification order once a remediation is patched
+  or its checks pass, and another attempt while verification still finds it vulnerable
+  (at most two reattempts). Orders carry `rule = remediation:<id>` /
+  `verify-remediation:<id>` and go through the same admission gate as the tick's.
+
 ## [0.40.0]
 
 - Configure engine logs through Core's secure first-party handlers and give startup, tick,

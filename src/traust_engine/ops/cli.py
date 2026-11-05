@@ -102,9 +102,14 @@ def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], sh
                 if shadow:
                     shadow_report = engine.shadow_once()
                     tick = shadow_report.tick
+                    # Only the cadence work feeds the shadow comparison; the
+                    # remediation trigger's orders are event-driven, not work
+                    # cron was scheduled to run.
                     report = Tick(at=core.clock.now(), due=shadow_report.due)
                     status = (
-                        f"shadow,due:{len(report.due)},planned:{tick.planned},"
+                        f"shadow,due:{len(report.due)},"
+                        f"remediation:{len(shadow_report.remediation)},"
+                        f"planned:{tick.planned},"
                         f"routed:{tick.routed},unrouted:{tick.unrouted},"
                         f"refused:{tick.refused_again},stale:{sum(tick.stale.values())},"
                         f"overdue:{sum(tick.overdue.values())},"
