@@ -1,9 +1,10 @@
 """The fourth trigger: remediation assessments and finished remediation runs on the feed
 become remediation and verification orders, read through the remediation service's door
 (REMEDIATION-SCHEDULING-DESIGN.md, "Engine trigger" and "Verification trigger"). The
-scheduling service is core's (core#377, RemediationSchedulingService); the fakes below
-stand in for it — the protocol for the controller's dispatch, the paged door for the CLI
-adapter that wires it in."""
+scheduling service is core's (core#391, RemediationSchedulingService on contracts#117's
+pivot: an effort is its work item — the `remediation` assessment — with the fork facts on
+the order that runs it); the fakes below stand in for it — the protocol for the
+controller's dispatch, the paged door for the CLI adapter that wires it in."""
 
 from __future__ import annotations
 
@@ -17,6 +18,7 @@ import pytest
 import yaml
 from traust_core.v1.context import Config, Context
 from traust_core.v1.context.context import Services
+from traust_core.v1.errors import NotFoundError
 from traust_core.v1.models.assessment import Assessment
 from traust_core.v1.models.common import Page, PageRequest, encode_cursor, every_item
 from traust_core.v1.models.operations import (
@@ -28,11 +30,8 @@ from traust_core.v1.models.operations import (
     RunOrder,
     WorkerId,
 )
-from traust_core.v1.models.remediation_scheduling import (
-    Remediation,
-    RemediationDetail,
-    RemediationFinding,
-)
+from traust_core.v1.models.remediation import WorkItem
+from traust_core.v1.models.remediation_scheduling import ScheduledEffort
 from traust_core.v1.models.values import GitSha, HttpsRepoUrl
 from traust_core.v1.models.vocabulary import AssessmentKind, RemediationStatus
 
@@ -76,11 +75,12 @@ class FakeFeed:
 
 
 class FakeRemediations:
-    """Core's remediation scheduling service in memory: rows keyed by assessment and
-    repository, exactly the reads the trigger asks for."""
+    """Core's remediation scheduling service in memory: efforts keyed by their handle (the
+    work item — the assessment the feed's events name) and by repository, exactly the reads
+    the trigger asks for."""
 
     def __init__(self, *states: RemediationState) -> None:
-        self.by_assessment = {s.assessment_id: s for s in states if s.assessment_id}
+        self.by_assessment = {s.remediation_id: s for s in states}
         self.by_repository: dict[UUID, list[RemediationState]] = {}
         for state in states:
             self.by_repository.setdefault(state.repository_id, []).append(state)
@@ -165,11 +165,11 @@ def _state(
     *,
     reattempts: int = 0,
     remediation_id: UUID | None = None,
-    assessment_id: UUID | None = None,
 ) -> RemediationState:
+    """One effort's state: `remediation_id` is the work item — the assessment — whose
+    effort it reports."""
     return RemediationState(
         remediation_id=remediation_id or uuid4(),
-        assessment_id=assessment_id,
         repository_id=repository_id,
         status=status,
         reattempts=reattempts,
@@ -237,7 +237,7 @@ def test_a_replayed_candidate_whose_remediation_moved_on_is_not_redispatched(
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
     requests = _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations(state)))
@@ -253,7 +253,7 @@ def test_an_implemented_remediation_plans_a_verification_order(
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref, run_order_id=uuid4())
-    state = _state(repository, status, assessment_id=assessment.id)
+    state = _state(repository, status, remediation_id=assessment.id)
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
     requests = _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations(state)))
@@ -273,7 +273,7 @@ def test_a_still_vulnerable_remediation_below_the_limit_is_reattempted(
         repository,
         RemediationStatus.REVALIDATED_STILL_VULNERABLE,
         reattempts=0,
-        assessment_id=assessment.id,
+        remediation_id=assessment.id,
     )
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
@@ -293,7 +293,7 @@ def test_a_still_vulnerable_remediation_at_the_limit_waits_for_a_person(
         repository,
         RemediationStatus.REVALIDATED_STILL_VULNERABLE,
         reattempts=2,
-        assessment_id=assessment.id,
+        remediation_id=assessment.id,
     )
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
@@ -307,7 +307,7 @@ def test_a_revalidated_fixed_remediation_is_left_to_the_filing_loop(
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref, run_order_id=uuid4())
-    state = _state(repository, RemediationStatus.REVALIDATED_FIXED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.REVALIDATED_FIXED, remediation_id=assessment.id)
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
     assert _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations(state))) == []
@@ -369,9 +369,9 @@ def test_an_open_order_suppresses_planning_another_for_the_subject(tmp_path: Pat
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref, run_order_id=uuid4())
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
-    services.ops.submit(  # the weekly sweep is already queued
-        OrderRequest(asset="verify_remediation", priority=50), ENGINE
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
+    _queued(  # the weekly sweep is already queued
+        services, OrderRequest(asset="verify_remediation", priority=50)
     )
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
@@ -445,7 +445,7 @@ def test_a_pack_that_runs_no_remediation_asset_skips_the_dispatch(tmp_path: Path
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
     assert _dispatched(_controller(services, Pack.load(PACK), feed, FakeRemediations(state))) == []
@@ -463,7 +463,7 @@ def test_the_loop_plans_and_admits_what_the_trigger_dispatches(tmp_path: Path) -
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
     loop = EngineLoop(services, clock, _pack(tmp_path), remediations=FakeRemediations(state))
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
 
@@ -483,6 +483,15 @@ def _run(services: Services, order: RunOrder, result: JobResult) -> None:
     services.ops.complete(order.id, worker, result)
 
 
+def _queued(services: Services, request: OrderRequest) -> RunOrder:
+    """An order queued as the loop's plan-and-admit would: core's submit door asks a
+    verified principal (a person, or a machine within recording.start), and the engine's
+    own orders go through plan and admit, which no policy gate holds."""
+    order = services.ops.plan(request, ENGINE)
+    assert order.id is not None
+    return services.ops.admit(order.id)
+
+
 def _planned(
     controller: Controller[Any], services: Services, pack: Pack
 ) -> list[tuple[str, UUID | None, str]]:
@@ -490,7 +499,7 @@ def _planned(
     (asset, subject, rule)."""
     requests, _ = controller.remediation_due(None)
     for request in requests:
-        services.ops.submit(request, ENGINE)
+        _queued(services, request)
     return [(r.asset, r.repository_id, r.rule or "") for r in requests]
 
 
@@ -504,8 +513,8 @@ def test_the_cursor_survives_a_planning_failure(tmp_path: Path) -> None:
     first_assessment = _assessment(T0, repository_ref_id=first_ref)
     second_assessment = _assessment(T0 + timedelta(minutes=1), repository_ref_id=second_ref)
     states = FakeRemediations(
-        _state(first, RemediationStatus.CANDIDATE, assessment_id=first_assessment.id),
-        _state(second, RemediationStatus.CANDIDATE, assessment_id=second_assessment.id),
+        _state(first, RemediationStatus.CANDIDATE, remediation_id=first_assessment.id),
+        _state(second, RemediationStatus.CANDIDATE, remediation_id=second_assessment.id),
     )
     feed = FakeFeed(
         [FeedEvent(assessment=first_assessment), FeedEvent(assessment=second_assessment)],
@@ -545,7 +554,7 @@ def test_the_shadow_reports_the_remediation_orders_a_pass_would_plan(tmp_path: P
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
     loop = EngineLoop(services, clock, _pack(tmp_path), remediations=FakeRemediations(state))
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
 
@@ -571,7 +580,7 @@ def test_the_shadow_does_not_consume_deferred_demand(tmp_path: Path) -> None:
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=assessment.id)
     pack = _pack(tmp_path)
     loop = EngineLoop(services, clock, pack, remediations=FakeRemediations(state))
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
@@ -601,7 +610,7 @@ def test_an_outdated_deferral_dispatches_nothing(tmp_path: Path) -> None:
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=assessment.id)
     states = FakeRemediations(state)
     pack = _pack(tmp_path)
     controller = _controller(
@@ -641,8 +650,8 @@ def test_a_candidate_suppressed_by_an_open_order_is_recovered_when_the_run_finis
     repository, ref = _repository(services)
     first = _assessment(T0, repository_ref_id=ref)
     second = _assessment(T0 + timedelta(minutes=1), repository_ref_id=ref)
-    first_state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=first.id)
-    second_state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=second.id)
+    first_state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=first.id)
+    second_state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=second.id)
     states = FakeRemediations(first_state, second_state)
     pack = _pack(tmp_path)
     controller = _controller(services, pack, FakeFeed([FeedEvent(assessment=first)]), states, clock)
@@ -683,7 +692,7 @@ def test_a_candidate_whose_run_never_recorded_is_retried_after_the_window(
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=assessment.id)
     pack = _pack(tmp_path)
     controller = _controller(
         services, pack, FakeFeed([FeedEvent(assessment=assessment)]), FakeRemediations(state), clock
@@ -717,15 +726,15 @@ def test_a_failed_attempt_waits_out_the_retry_window(tmp_path: Path) -> None:
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
     pack = _pack(tmp_path)
-    sweep = services.ops.submit(
+    sweep = _queued(
+        services,
         OrderRequest(
             asset="verify_remediation",
             priority=10,
             rule=f"verify-remediation:{state.remediation_id}",
         ),
-        ENGINE,
     )
     _run(services, sweep, JobResult.refused("source_unavailable"))
 
@@ -748,10 +757,10 @@ def test_a_fleet_wide_sweep_closing_rechecks_every_repository(tmp_path: Path) ->
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
     pack = _pack(tmp_path)
-    sweep = services.ops.submit(  # the fleet-wide sweep is open
-        OrderRequest(asset="verify_remediation", priority=50), ENGINE
+    sweep = _queued(  # the fleet-wide sweep is open
+        services, OrderRequest(asset="verify_remediation", priority=50)
     )
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
@@ -779,7 +788,7 @@ def test_a_failed_repair_is_retried_once_the_window_passes(tmp_path: Path) -> No
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=assessment.id)
     pack = _pack(tmp_path)
     controller = _controller(
         services, pack, FakeFeed([FeedEvent(assessment=assessment)]), FakeRemediations(state), clock
@@ -813,15 +822,15 @@ def test_deferred_demand_wakes_without_a_new_event(tmp_path: Path) -> None:
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.PATCHED, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.PATCHED, remediation_id=assessment.id)
     pack = _pack(tmp_path)
-    sweep = services.ops.submit(
+    sweep = _queued(
+        services,
         OrderRequest(
             asset="verify_remediation",
             priority=10,
             rule=f"verify-remediation:{state.remediation_id}",
         ),
-        ENGINE,
     )
     _run(services, sweep, JobResult.succeeded())
     controller = _controller(
@@ -882,7 +891,7 @@ def test_a_deferred_retry_wakes_when_eligible_not_a_window_after_it_was_seen(
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
-    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
+    state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=assessment.id)
     pack = _pack(tmp_path)
     controller = _controller(
         services, pack, FakeFeed([FeedEvent(assessment=assessment)]), FakeRemediations(state), clock
@@ -912,72 +921,82 @@ def test_a_deferred_retry_wakes_when_eligible_not_a_window_after_it_was_seen(
 
 
 class FakeScheduling:
-    """Core's remediation scheduling service in memory, over core's own row shapes: the
-    paged list and the detail get the adapter reads, a page at a time however small."""
+    """Core's remediation scheduling service in memory, over core's own effort shapes: the
+    paged list and the work-item-keyed get the adapter reads, a page at a time however
+    small."""
 
-    def __init__(
-        self,
-        scheduled: list[tuple[Remediation, tuple[RemediationFinding, ...]]],
-        page_size: int = 1000,
-    ) -> None:
-        self._rows = sorted(scheduled, key=lambda pair: (pair[0].created_at, pair[0].id))
-        self._findings = {row.id: findings for row, findings in scheduled}
+    def __init__(self, efforts: list[ScheduledEffort], page_size: int = 1000) -> None:
+        self._efforts = sorted(
+            efforts, key=lambda e: (e.work_item.opened_at, e.work_item.work_item_id)
+        )
         self._page_size = page_size
         self.lists = 0
         self.gets = 0
 
-    def list(self, page: PageRequest, *, repository_id: UUID | None = None) -> Page[Remediation]:
+    def list(
+        self,
+        page: PageRequest,
+        *,
+        status: RemediationStatus | None = None,
+        repository_id: UUID | None = None,
+        finding_id: UUID | None = None,
+    ) -> Page[ScheduledEffort]:
         self.lists += 1
         after = page.position()
         remaining = [
-            row for row, _ in self._rows if after is None or (row.created_at, row.id) > after
+            effort
+            for effort in self._efforts
+            if (status is None or effort.status == status)
+            and (repository_id is None or effort.repository_id == repository_id)
+            and (finding_id is None or finding_id in effort.work_item.finding_ids)
+            and (
+                after is None
+                or (effort.work_item.opened_at, str(effort.work_item.work_item_id))
+                > (after[0], str(after[1]))
+            )
         ]
-        if repository_id is not None:
-            remaining = [
-                row
-                for row in remaining
-                if any(f.repository_id == repository_id for f in self._findings[row.id])
-            ]
         take = remaining[: self._page_size]
         return Page(
             items=tuple(take),
-            # Core's `Page.of` convention: the cursor names the last taken row, and the
-            # read above resumes strictly past it.
-            next=encode_cursor(take[-1].created_at, take[-1].id)  # type: ignore[arg-type]
+            # Core's `Page.of` convention: the cursor names the last taken effort, and
+            # the read above resumes strictly past it.
+            next=encode_cursor(take[-1].work_item.opened_at, take[-1].work_item.work_item_id)
             if len(remaining) > self._page_size
             else None,
         )
 
-    def get(self, remediation_id: UUID) -> RemediationDetail:
+    def get(self, work_item_id: UUID) -> ScheduledEffort:
         self.gets += 1
-        row = next(row for row, _ in self._rows if row.id == remediation_id)
-        return RemediationDetail(remediation=row, findings=self._findings[remediation_id])
+        for effort in self._efforts:
+            if effort.work_item.work_item_id == work_item_id:
+                return effort
+        raise NotFoundError(f"work item {work_item_id} schedules no remediation")
 
 
-def _scheduled(
+def _effort(
     at: datetime,
     repository_id: UUID,
     status: RemediationStatus = RemediationStatus.PATCHED,
     *,
-    assessment_id: UUID | None = None,
-) -> tuple[Remediation, tuple[RemediationFinding, ...]]:
-    """One scheduled remediation with its findings junction, over core's own shapes."""
-    row = Remediation(
-        id=uuid4(),
-        created_at=at,
+    work_item_id: UUID | None = None,
+) -> ScheduledEffort:
+    """One scheduled effort over core's own shapes: its work item (the assessment) with
+    the order's fork facts and the repository the effort names, at its effective status —
+    here the work item's own, the fold being core's to compute."""
+    return ScheduledEffort(
+        work_item=WorkItem(
+            work_item_id=work_item_id or uuid4(),
+            repository_ref_id=uuid4(),
+            finding_ids=(uuid4(),),
+            status=status,
+            opened_at=at,
+        ),
+        repository_id=repository_id,
         fork_url="https://github.com/example/fork",
         fork_branch="fix",
         status=status,
-        assessment_id=assessment_id,
+        order_id=uuid4(),
     )
-    finding = RemediationFinding(
-        id=uuid4(),
-        created_at=at,
-        remediation_id=row.id,
-        finding_id=uuid4(),
-        repository_id=repository_id,
-    )
-    return row, (finding,)
 
 
 def _adapter(scheduling: FakeScheduling) -> cli._CoreRemediations:
@@ -986,72 +1005,69 @@ def _adapter(scheduling: FakeScheduling) -> cli._CoreRemediations:
     return cli._CoreRemediations(core)
 
 
-def test_the_adapter_maps_a_row_onto_the_protocols_state() -> None:
-    """`state_of` reads the row the assessment names: the repository through the
-    findings junction (the row itself carries none), the status off the row."""
+def test_the_adapter_maps_an_effort_onto_the_protocols_state() -> None:
+    """`state_of` reads the effort the assessment names — the service's get keys on the
+    work item, which the assessment is — with the repository off the effort and the
+    status the effort's effective one."""
     repository = uuid4()
     assessment = uuid4()
-    row, findings = _scheduled(T0, repository, assessment_id=assessment)
+    effort = _effort(T0, repository, work_item_id=assessment)
 
-    state = _adapter(FakeScheduling([(row, findings)])).state_of(assessment)
+    state = _adapter(FakeScheduling([effort])).state_of(assessment)
 
     assert state == RemediationState(
-        remediation_id=row.id,
-        assessment_id=assessment,
+        remediation_id=assessment,
         repository_id=repository,
         status=RemediationStatus.PATCHED,
     )
 
 
 def test_an_assessment_the_door_never_opened_has_no_state() -> None:
-    row, findings = _scheduled(T0, uuid4())
+    effort = _effort(T0, uuid4())
 
-    assert _adapter(FakeScheduling([(row, findings)])).state_of(uuid4()) is None
+    assert _adapter(FakeScheduling([effort])).state_of(uuid4()) is None
+
+
+def test_state_of_reads_the_keyed_get_not_the_pages() -> None:
+    """The assessment names the work item, so the keyed get answers it — a hit or a miss
+    walks no list pages; the miss is the get's own 404, suppressed into the None."""
+    repository = uuid4()
+    assessment = uuid4()
+    effort = _effort(T0, repository, work_item_id=assessment)
+    scheduling = FakeScheduling([effort], page_size=1)
+    adapter = _adapter(scheduling)
+
+    assert adapter.state_of(assessment) is not None
+    assert adapter.state_of(uuid4()) is None
+    assert scheduling.lists == 0
+    assert scheduling.gets == 2
 
 
 def test_states_of_names_only_the_repository_asked_for() -> None:
-    """The service's repository filter does the choosing — other repositories' rows never
-    arrive — so no row needs the per-row detail read the assessment walk pays."""
+    """The service's repository filter does the choosing — other repositories' efforts
+    never arrive — so none needs the keyed get, and each arrives with its repository
+    already on the effort."""
     repository, other = uuid4(), uuid4()
-    here, here_findings = _scheduled(T0, repository, RemediationStatus.CANDIDATE)
-    there, there_findings = _scheduled(T0 + timedelta(minutes=1), other)
-    scheduling = FakeScheduling([(here, here_findings), (there, there_findings)])
+    here = _effort(T0, repository, RemediationStatus.CANDIDATE)
+    there = _effort(T0 + timedelta(minutes=1), other)
+    scheduling = FakeScheduling([here, there])
 
     states = _adapter(scheduling).states_of(repository)
 
     assert [(s.remediation_id, s.repository_id, s.status) for s in states] == [
-        (here.id, repository, RemediationStatus.CANDIDATE)
+        (here.work_item.work_item_id, repository, RemediationStatus.CANDIDATE)
     ]
     assert scheduling.gets == 0
 
 
 def test_states_of_walks_every_page_of_the_repository() -> None:
     repository = uuid4()
-    scheduled = [
-        _scheduled(T0 + timedelta(minutes=n), repository, RemediationStatus.PATCHED)
-        for n in range(3)
-    ]
-    scheduling = FakeScheduling(scheduled, page_size=1)
+    efforts = [_effort(T0 + timedelta(minutes=n), repository) for n in range(3)]
+    scheduling = FakeScheduling(efforts, page_size=1)
 
     states = _adapter(scheduling).states_of(repository)
 
-    assert [s.remediation_id for s in states] == [row.id for row, _ in scheduled]
+    assert [s.remediation_id for s in states] == [
+        effort.work_item.work_item_id for effort in efforts
+    ]
     assert scheduling.lists == 3
-
-
-def test_state_of_stops_at_the_page_holding_the_match() -> None:
-    """The walk is lazy: a match on the first page reads no further one, and a miss
-    walks the pages that remain."""
-    repository = uuid4()
-    first, first_findings = _scheduled(T0, repository, assessment_id=uuid4())
-    later = [_scheduled(T0 + timedelta(minutes=n + 1), repository) for n in range(2)]
-    scheduling = FakeScheduling([(first, first_findings), *later], page_size=1)
-    adapter = _adapter(scheduling)
-
-    state = adapter.state_of(first.assessment_id)
-
-    assert state is not None and state.remediation_id == first.id
-    assert scheduling.lists == 1
-
-    assert adapter.state_of(uuid4()) is None
-    assert scheduling.lists == 4  # the miss walked the two pages that remained

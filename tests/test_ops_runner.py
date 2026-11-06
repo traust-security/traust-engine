@@ -23,7 +23,7 @@ import pytest
 import yaml
 from traust_core.v1.context import Config, Context
 from traust_core.v1.models.common import every_item
-from traust_core.v1.models.identity import Principal
+from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.operations import (
     JobResult,
     LaneName,
@@ -48,7 +48,12 @@ from traust_engine.ops.runner import Runner, UnresolvedParam, argv, runnable
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 MODELS = Path(__file__).parent / "fixtures" / "config" / "model-registry.yaml"
 WORKER = WorkerId("runner-1")
-OPERATOR = Principal(identity="op@example.com", kind=ActorKind.HUMAN, display="op")
+OPERATOR = Principal(
+    identity="op@example.com",
+    kind=ActorKind.HUMAN,
+    display="op",
+    verified_by=IdentitySource.OIDC,  # core's submit door asks a verified person
+)
 HOSTS = ("github.com",)
 
 

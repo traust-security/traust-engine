@@ -20,7 +20,7 @@ from traust_core.v1.context import (
     current_correlation,
 )
 from traust_core.v1.errors import ConflictError
-from traust_core.v1.models.identity import Principal
+from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.operations import JobResult, OrderRequest, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
@@ -36,7 +36,12 @@ PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 SECRET = "synthetic-secret-never-log"
 PRIVATE_URL = f"https://user:{SECRET}@private.example.test/repository"
 WORKER = WorkerId("logging-runner")
-OPERATOR = Principal(identity="operator@example.test", kind=ActorKind.HUMAN, display="operator")
+OPERATOR = Principal(
+    identity="operator@example.test",
+    kind=ActorKind.HUMAN,
+    display="operator",
+    verified_by=IdentitySource.OIDC,  # core's submit door asks a verified person
+)
 
 
 def _core_file(

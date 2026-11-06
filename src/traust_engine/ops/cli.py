@@ -16,7 +16,7 @@ import sys
 import time
 import traceback
 from collections.abc import Collection, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from datetime import timedelta
 from pathlib import Path
 from time import perf_counter
@@ -28,7 +28,7 @@ from traust_core.v1.errors import ConfigError, NotFoundError, PreflightError, Tr
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
-from traust_core.v1.models.remediation_scheduling import Remediation
+from traust_core.v1.models.remediation_scheduling import ScheduledEffort
 from traust_core.v1.models.vocabulary import ActorKind
 
 from traust_engine.ops.events import lifecycle
@@ -77,7 +77,7 @@ def _router(spec: str) -> Any:
 
 class _CoreRemediations:
     """Core's remediation scheduling service as the engine's `Remediations` protocol: the
-    door's rows read back as the state reports the trigger dispatches on. `reattempts`
+    scheduled efforts read back as the state reports the trigger dispatches on. `reattempts`
     stays at its default until core exposes the order count the protocol says it derives
     there; until then a revalidated-still-vulnerable effort reads as untried."""
 
@@ -85,39 +85,33 @@ class _CoreRemediations:
         self._scheduling = core.services().remediation_scheduling
 
     def state_of(self, assessment_id: UUID) -> RemediationState | None:
-        """The remediation of `assessment_id`, None when the assessment has no row. The
-        service pages by status, repository or finding — not by assessment — so this walks
-        the pages and stops at the one holding the match; a by-assessment read is core's
-        to offer, not the engine's to reach past the service for."""
-        for row in self._rows():
-            if row.assessment_id == assessment_id:
-                # The row carries no repository of its own: the door schedules one
-                # repository's findings and writes each with its repository to the
-                # junction beside the row, so the first finding's is the effort's. A
-                # junction the door left empty cannot happen (it takes at least one
-                # finding); the nil UUID stands in rather than guess a repository.
-                detail = self._scheduling.get(row.id)
-                repository_id = detail.findings[0].repository_id if detail.findings else UUID(int=0)
-                return self._state(row, repository_id)
+        """The scheduled effort of `assessment_id`, None when the assessment is no effort —
+        no work item, or no order carrying its fork facts (it was not opened through the
+        scheduling door). The service keys its get on the work item, which the assessment
+        is (contracts#117), so the assessment id goes to it directly; the 404 a miss raises
+        is this None. A read that misses softly — None, not a suppressed 404 — is core's
+        to offer."""
+        with suppress(NotFoundError):
+            return self._state(self._scheduling.get(assessment_id))
         return None
 
     def states_of(self, repository_id: UUID) -> list[RemediationState]:
-        """Every remediation of the repository, whatever its status: the service's
-        repository filter names the rows, so none needs the per-row read the walk above
-        pays for a repository it could not know."""
-        return [self._state(row, repository_id) for row in self._rows(repository_id=repository_id)]
+        """Every scheduled effort of the repository, whatever its status: the service's
+        repository filter names them, each with its repository read off the effort — no
+        ref resolution and no per-effort detail read."""
+        return [self._state(effort) for effort in self._efforts(repository_id=repository_id)]
 
-    def _rows(self, *, repository_id: UUID | None = None) -> Iterator[Remediation]:
-        """Every scheduled remediation at the filter, every page followed."""
+    def _efforts(self, *, repository_id: UUID | None = None) -> Iterator[ScheduledEffort]:
+        """Every scheduled effort at the filter, every page followed."""
         return every_item(lambda page: self._scheduling.list(page, repository_id=repository_id))
 
-    def _state(self, row: Remediation, repository_id: UUID) -> RemediationState:
-        """One row as the trigger's state report."""
+    def _state(self, effort: ScheduledEffort) -> RemediationState:
+        """One effort as the trigger's state report: the handle is the work item (the
+        assessment), the status the effort's effective one — the fold core reads."""
         return RemediationState(
-            remediation_id=row.id,
-            assessment_id=row.assessment_id,
-            repository_id=repository_id,
-            status=row.status,
+            remediation_id=effort.work_item.work_item_id,
+            repository_id=effort.repository_id,
+            status=effort.status,
         )
 
 

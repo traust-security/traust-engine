@@ -346,8 +346,9 @@ class Controller(Generic[S]):
                         if state is not None:
                             self._dispatch(state, requests, planned, busy)
                     elif assessment.kind == AssessmentKind.VERIFICATION:
-                        # A recorded verification moved its remediations to revalidated_*;
-                        # the verdicts are what name the repository to re-check.
+                        # A recorded verification's verdicts fold into the efforts'
+                        # effective statuses at read; the verdicts are what name the
+                        # repository to re-check.
                         if (repository_id := self._repository_of(assessment)) is not None:
                             recheck[repository_id] = None
                 elif (
@@ -393,17 +394,18 @@ class Controller(Generic[S]):
             and assessment.run_order_id is None
             and (state is None or state.status == RemediationStatus.CANDIDATE)
         ):
-            # The door creates the assessment and its order atomically; one without an
-            # order was opened beside it, so the engine submits the order itself — unless
-            # the remediation has already moved on (a replayed event) or one is open.
+            # The door opens the work item and submits its order atomically; one without
+            # an order was opened beside it, so the engine submits the order itself —
+            # unless the effort has already moved on (a replayed event) or one is open.
+            # The work item is the assessment, so its id is the effort's handle the
+            # rule names.
             repository_id = (
                 state.repository_id if state is not None else self._repository_of(assessment)
             )
-            named = state.remediation_id if state is not None else assessment.id
             self._request(
                 REMEDIATE_ASSET,
                 repository_id,
-                f"remediation:{named}",
+                f"remediation:{assessment.id}",
                 requests,
                 planned,
                 busy,
@@ -417,7 +419,7 @@ class Controller(Generic[S]):
         planned: set[tuple[AssetName, UUID | None]],
         busy: dict[AssetName, tuple[set[UUID | None], set[UUID | None]]],
     ) -> None:
-        """Re-read the repository's remediations and dispatch whatever their current
+        """Re-read the repository's scheduled efforts and dispatch whatever their current
         status calls for."""
         if repository_id is None or self._remediations is None:
             return
@@ -431,7 +433,7 @@ class Controller(Generic[S]):
         planned: set[tuple[AssetName, UUID | None]],
         busy: dict[AssetName, tuple[set[UUID | None], set[UUID | None]]],
     ) -> None:
-        """The order a remediation's current status calls for: verification once it is
+        """The order an effort's effective status calls for: verification once it is
         implemented, another attempt while verification still finds it vulnerable and the
         limit has not been reached, and the remediation order a candidate still waits on
         (one the door left unpaired, or whose earlier attempt is past its retry window).
