@@ -376,10 +376,12 @@ def test_diff_ignores_remediation_runs_as_event_driven_work(core: Path, tmp_path
     ops = Context.from_file(core).services().ops
     trigger_rule = "remediation:" + str(uuid4())
     worker = WorkerId("runner-1")
-    queued = ops.submit(
+    queued = ops.plan(
         OrderRequest(asset="verify_remediation", priority=1, rule=trigger_rule),
         ENGINE_PRINCIPAL,
     )
+    assert queued.id is not None
+    queued = ops.admit(queued.id)
     claimed = ops.claim(worker, timedelta(minutes=5), (AssetName("verify_remediation"),))
     assert claimed is not None and claimed.id == queued.id
     ops.complete(queued.id, worker, JobResult.succeeded())

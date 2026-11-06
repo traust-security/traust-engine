@@ -938,7 +938,7 @@ wheels = [
 [[package]]
 name = "traust-contracts"
 version = "0.0.0"
-source = { git = "https://github.com/traust-security/traust-contracts.git?rev=620b83849a32dd3cc48980944286411bd485e9fa#620b83849a32dd3cc48980944286411bd485e9fa" }
+source = { git = "https://github.com/traust-security/traust-contracts.git?rev=34573e3ce2973f3251007c9fbfa990ccb8b5e3c6#34573e3ce2973f3251007c9fbfa990ccb8b5e3c6" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -948,7 +948,7 @@ dependencies = [
 [[package]]
 name = "traust-core"
 version = "0.1.0"
-source = { git = "https://github.com/traust-security/traust-core.git?rev=3dee98350aa9fe9bca58af8b9203f7585163f8d9#3dee98350aa9fe9bca58af8b9203f7585163f8d9" }
+source = { git = "https://github.com/traust-security/traust-core.git?rev=6ead8d83f1b695a6d3f34dc3232da4c902632d82#6ead8d83f1b695a6d3f34dc3232da4c902632d82" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -993,7 +993,7 @@ dev = [
 requires-dist = [
     { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "traust-core", extras = ["postgres"], git = "https://github.com/traust-security/traust-core.git?rev=3dee98350aa9fe9bca58af8b9203f7585163f8d9" },
+    { name = "traust-core", extras = ["postgres"], git = "https://github.com/traust-security/traust-core.git?rev=6ead8d83f1b695a6d3f34dc3232da4c902632d82" },
 ]
 
 [package.metadata.requires-dev]
