@@ -10,3 +10,6 @@ dist/
 
 ## local migration files
 migration.yaml
+
+## fetched for the container build (Containerfile COPY gitleaks); never committed
+/gitleaks

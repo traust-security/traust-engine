@@ -64,6 +64,12 @@ COPY LICENSE /licenses/LICENSE
 
 COPY --from=builder /app/.venv /app/.venv
 
+# The engine's preflight requires gitleaks; the distroless runtime has no shell or
+# package manager, so the binary ships in the image. Fetch a release to the repo root
+# before building (validated with v8.21.2) — it is .gitignore'd, never committed; the
+# build context includes it through .containerignore's !gitleaks.
+COPY gitleaks /usr/local/bin/gitleaks
+
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
