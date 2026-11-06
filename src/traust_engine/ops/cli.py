@@ -346,16 +346,19 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _error(operation: str, error: Exception) -> None:
+    """The one line a failure leaves on stderr. A config or preflight failure carries its
+    own words — the message names the file and the rule that failed, where a live session
+    once paid hours for the generic hint that hid them — while a foreign exception's
+    message can echo anything (paths, output, arguments), so it keeps the type alone, or
+    the hint where the CLI knows one."""
     detail = ""
     if isinstance(error, PreflightError):
         detail = str(error)
     elif isinstance(error, ConfigError):
-        if str(error) == "give the command after --, and --repo exactly when the asset has one":
-            detail = str(error)
-        elif "no --router was given" in str(error):
+        if "no --router was given" in str(error):
             detail = "no --router was given; pass --router module:Class or remove route_on"
         else:
-            detail = "check --core, --pack and the configuration files"
+            detail = str(error)
     elif isinstance(error, NotFoundError):
         detail = "check the asset and --repo against the pack and inventory"
     elif isinstance(error, FileNotFoundError) and operation == "startup":

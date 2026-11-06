@@ -10,6 +10,10 @@ All notable changes to traust-engine are documented here.
   staying dormant. The adapter walks the door's paged rows — by assessment through the
   findings junction, by repository through the service's own filter — and maps them onto
   the trigger's state reports.
+- A config failure's error line carries the failure's own message — the file and the
+  schema rule that failed — instead of the generic "check --core, --pack and the
+  configuration files"; foreign exceptions stay bounded to their type and hint, and the
+  log still carries no message text.
 
 ## [0.41.0]
 
