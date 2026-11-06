@@ -2,6 +2,29 @@
 
 All notable changes to traust-engine are documented here.
 
+## [0.42.0]
+
+- Wire the remediation trigger to core's scheduling service: `traust-engine run` and
+  `shadow` build the loop's `Remediations` from `RemediationSchedulingService`
+  (traust-core 3dee9835, core#377), so remediation-driven dispatch runs instead of
+  staying dormant. The adapter walks the door's paged rows — by assessment through the
+  findings junction, by repository through the service's own filter — and maps them onto
+  the trigger's state reports.
+- A config failure's error line carries the failure's own message — the file and the
+  schema rule that failed — instead of the generic "check --core, --pack and the
+  configuration files"; foreign exceptions stay bounded to their type and hint, and the
+  log still carries no message text.
+
+## [0.41.0]
+
+- Add the fourth work trigger: remediation-driven dispatch. The engine reads the ops feed
+  for remediation assessments and finished remediation runs, asks core's remediation
+  scheduling service for current state, and plans the remediation order for a request the
+  scheduling door left without one, the verification order once a remediation is patched
+  or its checks pass, and another attempt while verification still finds it vulnerable
+  (at most two reattempts). Orders carry `rule = remediation:<id>` /
+  `verify-remediation:<id>` and go through the same admission gate as the tick's.
+
 ## [0.40.0]
 
 - Configure engine logs through Core's secure first-party handlers and give startup, tick,

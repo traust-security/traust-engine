@@ -6,3 +6,4 @@
 !LICENSE
 !pyproject.toml
 !uv.lock
+!gitleaks

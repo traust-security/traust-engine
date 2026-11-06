@@ -583,9 +583,14 @@ def test_the_run_manifest_names_the_toolchain_pins_next_to_the_pack(tmp_path: Pa
 
 
 def _runs(services: Services, asset: str, repository_id: UUID | None = None) -> None:
-    """A run beside the engine (cron, by hand): submitted, claimed and completed."""
-    services.ops.submit(OrderRequest(asset=asset, priority=1, repository_id=repository_id), ENGINE)
-    _drain(services)
+    """A run beside the engine (cron, by hand): started and completed through the recorded-run
+    door — core's submit gate now asks a verified principal, and a run the engine did not plan
+    is exactly what `start` records."""
+    order = services.ops.start(
+        OrderRequest(asset=asset, priority=1, repository_id=repository_id), ENGINE, WORKER, LEASE
+    )
+    assert order.id is not None
+    services.ops.complete(order.id, WORKER, SUCCEEDED)  # type: ignore[arg-type]
 
 
 def _requests(report: Any) -> list[tuple[str, UUID | None]]:
