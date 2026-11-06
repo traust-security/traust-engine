@@ -21,17 +21,20 @@ from datetime import timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from traust_core.v1.context import Context, correlation_scope
 from traust_core.v1.errors import ConfigError, NotFoundError, PreflightError, TraustError
+from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
+from traust_core.v1.models.remediation_scheduling import Remediation
 from traust_core.v1.models.vocabulary import ActorKind
 
 from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
+from traust_engine.ops.remediation import RemediationState
 from traust_engine.ops.runner import Runner, runnable
 from traust_engine.ops.shadow import (
     Diff,
@@ -72,6 +75,52 @@ def _router(spec: str) -> Any:
         raise ConfigError(f"router {spec}: {e}") from e
 
 
+class _CoreRemediations:
+    """Core's remediation scheduling service as the engine's `Remediations` protocol: the
+    door's rows read back as the state reports the trigger dispatches on. `reattempts`
+    stays at its default until core exposes the order count the protocol says it derives
+    there; until then a revalidated-still-vulnerable effort reads as untried."""
+
+    def __init__(self, core: Context) -> None:
+        self._scheduling = core.services().remediation_scheduling
+
+    def state_of(self, assessment_id: UUID) -> RemediationState | None:
+        """The remediation of `assessment_id`, None when the assessment has no row. The
+        service pages by status, repository or finding — not by assessment — so this walks
+        the pages and stops at the one holding the match; a by-assessment read is core's
+        to offer, not the engine's to reach past the service for."""
+        for row in self._rows():
+            if row.assessment_id == assessment_id:
+                # The row carries no repository of its own: the door schedules one
+                # repository's findings and writes each with its repository to the
+                # junction beside the row, so the first finding's is the effort's. A
+                # junction the door left empty cannot happen (it takes at least one
+                # finding); the nil UUID stands in rather than guess a repository.
+                detail = self._scheduling.get(row.id)
+                repository_id = detail.findings[0].repository_id if detail.findings else UUID(int=0)
+                return self._state(row, repository_id)
+        return None
+
+    def states_of(self, repository_id: UUID) -> list[RemediationState]:
+        """Every remediation of the repository, whatever its status: the service's
+        repository filter names the rows, so none needs the per-row read the walk above
+        pays for a repository it could not know."""
+        return [self._state(row, repository_id) for row in self._rows(repository_id=repository_id)]
+
+    def _rows(self, *, repository_id: UUID | None = None) -> Iterator[Remediation]:
+        """Every scheduled remediation at the filter, every page followed."""
+        return every_item(lambda page: self._scheduling.list(page, repository_id=repository_id))
+
+    def _state(self, row: Remediation, repository_id: UUID) -> RemediationState:
+        """One row as the trigger's state report."""
+        return RemediationState(
+            remediation_id=row.id,
+            assessment_id=row.assessment_id,
+            repository_id=repository_id,
+            status=row.status,
+        )
+
+
 @contextmanager
 def _loop(core: Context, pack: Pack, router: str | None) -> Iterator[EngineLoop]:
     with core.repository_observation() as observation:
@@ -81,6 +130,7 @@ def _loop(core: Context, pack: Pack, router: str | None) -> Iterator[EngineLoop]
             pack,
             _router(router) if router else None,
             (lambda r: observation.query.repo_state(repository_id=r)) if router else None,
+            _CoreRemediations(core),
         )
 
 
