@@ -14,7 +14,7 @@ from typing import Protocol
 from uuid import UUID
 
 from traust_core.v1.models.base import Model
-from traust_core.v1.models.operations import AssetName
+from traust_core.v1.models.operations import AssetName, RunOrder
 from traust_core.v1.models.vocabulary import RemediationStatus
 
 #: The pack assets the trigger dispatches. `remediate_finding` is the skill session that
@@ -29,11 +29,34 @@ VERIFY_ASSET = AssetName("verify_remediation")
 REATTEMPT_LIMIT = 2
 
 #: How long an attempted order (finished, degraded, failed or refused) suppresses
-#: re-dispatching the same subject, the cadence path's "a refused or failed run waits out
-#: the cadence" rule carried over to event-driven work: a sweep that fails without a
-#: verdict, or a run that finishes without recording, is retried at most this often —
-#: by the next pass after the window, not by every restart or recheck.
+#: re-dispatching the same remediation, the cadence path's "a refused or failed run
+#: waits out the cadence" rule carried over to event-driven work: a sweep that fails
+#: without a verdict, or a run that finishes without recording, is retried at most
+#: this often — by the next pass after the window, not by every restart or recheck.
+#: The bound is per remediation (its rule), not per repository: an unrelated
+#: remediation of the same repository is serialized by the open-order check alone.
 RETRY_AFTER = timedelta(hours=1)
+
+#: The rules the trigger's orders carry: "remediation:<remediation_id>" and
+#: "verify-remediation:<remediation_id>". The retry window keys on them, and the
+#: shadow comparison excludes runs that carry them (or a work item) as event-driven
+#: remediation work, not cadence work.
+REMEDIATE_RULE_PREFIX = "remediation:"
+VERIFY_RULE_PREFIX = "verify-remediation:"
+
+
+def is_remediation_rule(rule: str | None) -> bool:
+    """Whether an order's rule is one the remediation trigger mints."""
+    return rule is not None and (
+        rule.startswith(REMEDIATE_RULE_PREFIX) or rule.startswith(VERIFY_RULE_PREFIX)
+    )
+
+
+def is_remediation_run(order: RunOrder) -> bool:
+    """Whether a finished order is remediation work rather than cadence work: the
+    trigger's own orders carry its rules, and the scheduling door's orders name a
+    work item. The shadow comparison measures cadence work only."""
+    return is_remediation_rule(order.rule) or order.work_item_id is not None
 
 
 class RemediationState(Model):

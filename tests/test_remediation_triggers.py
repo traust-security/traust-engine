@@ -648,14 +648,15 @@ def test_a_candidate_suppressed_by_an_open_order_is_recovered_when_the_run_finis
     assert _planned(controller, services, pack) == []
 
     # The first run finished and recorded: its remediation moved on, and the recheck
-    # dispatches the verification it calls for and the second candidate's order.
+    # dispatches the verification it calls for and the second candidate's order —
+    # immediately, because the retry window is the first remediation's, not the
+    # repository's: an unrelated candidate never waits out another's attempt.
     (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
     _run(services, order, JobResult.succeeded())
     states.by_assessment[first.id] = first_state.model_copy(
         update={"status": RemediationStatus.PATCHED}
     )
     states.by_repository[repository] = [states.by_assessment[first.id], second_state]
-    clock.at = T0 + timedelta(hours=2)  # past the finished run's retry window
     controller._feed = FakeFeed(  # type: ignore[assignment]
         [FeedEvent(order=_order(T0 + timedelta(minutes=2), repository_id=repository))]
     )
@@ -900,3 +901,77 @@ def test_a_deferred_retry_wakes_when_eligible_not_a_window_after_it_was_seen(
     assert _planned(controller, services, pack) == [
         ("remediate_finding", repository, f"remediation:{state.remediation_id}")
     ]
+
+
+def test_an_unrelated_remediation_does_not_wait_out_another_attempt(
+    tmp_path: Path,
+) -> None:
+    """The retry window is the remediation's own, not the repository's: a candidate
+    whose remediation never ran dispatches right after an unrelated order of the
+    same repository finishes — only the open-order serialization applies."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    repository, ref = _repository(services)
+    first = _assessment(T0, repository_ref_id=ref)
+    second = _assessment(T0 + timedelta(minutes=1), repository_ref_id=ref)
+    first_state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=first.id)
+    second_state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=second.id)
+    pack = _pack(tmp_path)
+    controller = _controller(
+        services,
+        pack,
+        FakeFeed([FeedEvent(assessment=first)]),
+        FakeRemediations(first_state, second_state),
+        clock,
+    )
+    assert _planned(controller, services, pack) == [
+        ("remediate_finding", repository, f"remediation:{first_state.remediation_id}")
+    ]
+    (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
+    _run(services, order, JobResult.succeeded())
+
+    # Minutes later — deep inside the first attempt's retry window — the second
+    # candidate's event arrives: it dispatches now, not after the hour.
+    clock.at = T0 + timedelta(minutes=5)
+    controller._feed = FakeFeed([FeedEvent(assessment=second)])  # type: ignore[assignment]
+    assert _planned(controller, services, pack) == [
+        ("remediate_finding", repository, f"remediation:{second_state.remediation_id}")
+    ]
+
+
+def test_a_wake_survives_a_planning_failure(tmp_path: Path) -> None:
+    """A matured wake whose pass fails to plan is not lost: the wake is kept until a
+    pass proves the demand satisfied, so the next pass — whose cursor is past the
+    creating event — still dispatches it, immediately (its ready_at has passed)."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    repository, ref = _repository(services)
+    assessment = _assessment(T0, repository_ref_id=ref)
+    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
+    pack = _pack(tmp_path)
+    loop = EngineLoop(services, clock, pack, remediations=FakeRemediations(state))
+    loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
+    assert loop.run_once().remediation == 1
+    (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
+    _run(services, order, JobResult.succeeded())
+    loop._controller._feed = FakeFeed(  # type: ignore[assignment]
+        [FeedEvent(order=_order(T0 + timedelta(minutes=1), repository_id=repository))]
+    )
+    loop.run_once()  # the run landed without a record: the candidate demand defers
+    clock.at = T0 + timedelta(hours=2)  # the wake matures
+
+    # The wake's pass dispatches, and planning fails after it: the wake survives.
+    loop._controller._feed = FakeFeed([])  # type: ignore[assignment]
+    original = services.ops.plan
+
+    def failing(request: OrderRequest, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("planning failed")
+
+    services.ops.plan = failing  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="planning failed"):
+        loop.run_once()
+    assert loop._controller._deferred  # the wake is still there
+
+    # The next pass dispatches it again — no event, no window: its time had come.
+    services.ops.plan = original  # type: ignore[method-assign]
+    assert loop.run_once().remediation == 1

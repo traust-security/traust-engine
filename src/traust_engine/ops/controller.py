@@ -323,9 +323,11 @@ class Controller(Generic[S]):
         assert self._feed is not None and self._portfolio is not None
         requests: list[OrderRequest] = []
         planned: set[tuple[AssetName, UUID | None]] = set()
-        busy: dict[AssetName, tuple[set[UUID | None], set[UUID | None]]] = {}
+        busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]] = {}
+        demanded: set[UUID] = set()  # repositories this pass dispatched or deferred for
         now = self._clock.now()
         recheck: dict[UUID, None] = {}  # insertion-ordered set
+        woken: dict[UUID, datetime] = {}
         if wake:
             # A matured deferral wakes as a recheck of its repository's current
             # states: demand that moved on while it waited dispatches nothing.
@@ -334,7 +336,7 @@ class Controller(Generic[S]):
             # event, nothing to rediscover.
             for repository_id, ready_at in list(self._deferred.items()):
                 if ready_at <= now:
-                    del self._deferred[repository_id]
+                    woken[repository_id] = self._deferred.pop(repository_id)
                     recheck[repository_id] = None
         fleet_wide = False
         while True:
@@ -342,9 +344,11 @@ class Controller(Generic[S]):
             for event in page.items:
                 if (assessment := event.assessment) is not None:
                     if assessment.kind == AssessmentKind.REMEDIATION:
-                        state = self._assessment_request(assessment, requests, planned, busy)
+                        state = self._assessment_request(
+                            assessment, requests, planned, busy, demanded
+                        )
                         if state is not None:
-                            self._dispatch(state, requests, planned, busy)
+                            self._dispatch(state, requests, planned, busy, demanded)
                     elif assessment.kind == AssessmentKind.VERIFICATION:
                         # A recorded verification moved its remediations to revalidated_*;
                         # the verdicts are what name the repository to re-check.
@@ -371,10 +375,20 @@ class Controller(Generic[S]):
             if page.next is None:
                 break
         for repository_id in recheck:
-            self._recheck(repository_id, requests, planned, busy)
+            self._recheck(repository_id, requests, planned, busy, demanded)
         if fleet_wide:
             for repository_id in self._repositories():
-                self._recheck(repository_id, requests, planned, busy)
+                self._recheck(repository_id, requests, planned, busy, demanded)
+        # A woken deferral survives its pass unless the pass proves the demand
+        # satisfied: a repository the pass dispatched for keeps its wake (a
+        # planning failure after this return then finds it intact next pass —
+        # its ready_at has passed, so the retry is immediate), a repository
+        # re-deferred already carries a fresh one, and a repository nothing
+        # was due for drops it. A wake whose dispatch planned cleanly fires
+        # once more, meets the open order, and drops.
+        for repository_id, ready_at in woken.items():
+            if repository_id in demanded and repository_id not in self._deferred:
+                self._deferred[repository_id] = ready_at
         return requests, cursor
 
     def _assessment_request(
@@ -382,7 +396,8 @@ class Controller(Generic[S]):
         assessment: Assessment,
         requests: list[OrderRequest],
         planned: set[tuple[AssetName, UUID | None]],
-        busy: dict[AssetName, tuple[set[UUID | None], set[UUID | None]]],
+        busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
+        demanded: set[UUID],
     ) -> RemediationState | None:
         """One remediation assessment on the feed: the remediation order for a request the
         scheduling door left without one, and the assessment's current state."""
@@ -407,6 +422,7 @@ class Controller(Generic[S]):
                 requests,
                 planned,
                 busy,
+                demanded,
             )
         return state
 
@@ -415,21 +431,23 @@ class Controller(Generic[S]):
         repository_id: UUID | None,
         requests: list[OrderRequest],
         planned: set[tuple[AssetName, UUID | None]],
-        busy: dict[AssetName, tuple[set[UUID | None], set[UUID | None]]],
+        busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
+        demanded: set[UUID],
     ) -> None:
         """Re-read the repository's remediations and dispatch whatever their current
         status calls for."""
         if repository_id is None or self._remediations is None:
             return
         for state in self._remediations.states_of(repository_id):
-            self._dispatch(state, requests, planned, busy)
+            self._dispatch(state, requests, planned, busy, demanded)
 
     def _dispatch(
         self,
         state: RemediationState,
         requests: list[OrderRequest],
         planned: set[tuple[AssetName, UUID | None]],
-        busy: dict[AssetName, tuple[set[UUID | None], set[UUID | None]]],
+        busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
+        demanded: set[UUID],
     ) -> None:
         """The order a remediation's current status calls for: verification once it is
         implemented, another attempt while verification still finds it vulnerable and the
@@ -445,6 +463,7 @@ class Controller(Generic[S]):
                 requests,
                 planned,
                 busy,
+                demanded,
             )
         elif state.status in (RemediationStatus.PATCHED, RemediationStatus.CHECKS_PASSED):
             self._request(
@@ -454,6 +473,7 @@ class Controller(Generic[S]):
                 requests,
                 planned,
                 busy,
+                demanded,
             )
         elif (
             state.status == RemediationStatus.REVALIDATED_STILL_VULNERABLE
@@ -466,6 +486,7 @@ class Controller(Generic[S]):
                 requests,
                 planned,
                 busy,
+                demanded,
             )
 
     def _request(
@@ -475,13 +496,16 @@ class Controller(Generic[S]):
         rule: str,
         requests: list[OrderRequest],
         planned: set[tuple[AssetName, UUID | None]],
-        busy: dict[AssetName, tuple[set[UUID | None], set[UUID | None]]],
-    ) -> None:
+        busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
+        demanded: set[UUID],
+    ) -> bool:
         """Plan one order of `asset` for the repository, unless the pack runs no such
-        asset, one is already open for the subject, an attempt the retry window has not
-        outlived holds it, or this pass already planned it. Demand an attempt holds is
-        deferred with a wake-up, not dropped: the first pass after the window dispatches
-        it (a restart loses the memory, but its full replay re-derives it)."""
+        asset, one is already open for the subject, an attempt of this very remediation
+        the retry window has not outlived holds it, or this pass already planned it.
+        Demand an attempt holds is deferred with a wake-up, not dropped: the first pass
+        after the window dispatches it (a restart loses the memory, but its full replay
+        re-derives it). Returns whether the repository's demand was served — dispatched
+        or deferred — so a woken deferral knows its pass owed it something."""
         spec = self._pack.assets.get(asset)
         if spec is None or not spec.enabled:
             log.warning(
@@ -489,51 +513,58 @@ class Controller(Generic[S]):
                 self._pack.pack,
                 asset,
             )
-            return
+            return False
         subject = repository_id if spec.partitions else None
         if spec.partitions and subject is None:
             log.warning("remediation dispatch of %s has no repository to work on", asset)
-            return
+            return False
         if asset not in busy:
-            # Open orders suppress re-planning; an attempt within the retry window
-            # defers the demand instead: a sweep or run that landed without a verdict
-            # is retried at most once per window, and woken when the window passes —
-            # not by every restart or recheck, and never lost behind the cursor.
-            # The wake honors the attempt's own age (its finished_at), so an
-            # attempt seen near the end of its window wakes the demand shortly
-            # after it becomes eligible, not a full window after the pass that
-            # noticed it.
+            # Open orders suppress re-planning; an attempt of this remediation
+            # within the retry window defers its demand instead: a sweep or run
+            # that landed without a verdict is retried at most once per window,
+            # and woken when the window passes — not by every restart or recheck,
+            # and never lost behind the cursor. The window is keyed by the rule —
+            # the remediation — not the subject: an unrelated remediation of the
+            # same repository waits only for the open order, never the hour. The
+            # wake honors the attempt's own age (its finished_at), so an attempt
+            # seen near the end of its window wakes the demand shortly after it
+            # becomes eligible, not a full window after the pass that noticed it.
             window_start = self._clock.now() - RETRY_AFTER
-            attempted: dict[UUID | None, datetime] = {}
+            attempted: dict[str, datetime] = {}
             # The remediation assets are event-driven and low-volume, so paging
-            # their attempted orders and keeping those inside the window is
-            # exact where subjects() would say only that one exists.
+            # their attempted orders and keeping those inside the window is exact
+            # where subjects() would say only that one exists. Orders without a
+            # trigger rule are not this remediation's to wait for.
             for order in every_item(
                 lambda page: self._ops.list(OrderFilter(states=ATTEMPTED, asset=asset), page)
             ):
-                key = order.repository_id if spec.partitions else None
                 if (
-                    order.finished_at is not None
+                    order.rule is not None
+                    and order.finished_at is not None
                     and order.finished_at > window_start
-                    and (key not in attempted or order.finished_at > attempted[key])
+                    and (order.rule not in attempted or order.finished_at > attempted[order.rule])
                 ):
-                    attempted[key] = order.finished_at
+                    attempted[order.rule] = order.finished_at
             busy[asset] = (self._ops.subjects(asset, OPEN_ORDER_STATES), attempted)
         open_, attempted = busy[asset]
         if subject in open_ or (asset, subject) in planned:
-            return
-        if (attempted_at := attempted.get(subject)) is not None:
+            return False
+        if (attempted_at := attempted.get(rule)) is not None:
             # The repository the demand is about — the one whose states a wake
             # rechecks — keeps the earliest wake; a later demand for the same
             # repository never postpones it.
             ready = attempted_at + RETRY_AFTER
             if repository_id is not None:
                 self._deferred[repository_id] = min(self._deferred.get(repository_id, ready), ready)
-            return
+                demanded.add(repository_id)
+            return True
         planned.add((asset, subject))
         requests.append(
             OrderRequest(asset=asset, priority=spec.priority, repository_id=subject, rule=rule)
         )
+        if repository_id is not None:
+            demanded.add(repository_id)
+        return True
 
     def _repository_of(self, assessment: Assessment) -> UUID | None:
         """The repository an assessment examined; None when its commit is gone."""

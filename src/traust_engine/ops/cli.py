@@ -32,6 +32,7 @@ from traust_core.v1.models.vocabulary import ActorKind
 from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
+from traust_engine.ops.remediation import is_remediation_run
 from traust_engine.ops.runner import Runner, runnable
 from traust_engine.ops.shadow import (
     Diff,
@@ -205,6 +206,10 @@ def _diff(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     ticks = [t for t in (Tick.model_validate_json(x) for x in lines if x.strip()) if t.at >= since]
     cadence = {name: a.trigger.every for name, a in pack.assets.items() if a.trigger.every}
     runs = list(recorded_runs(services, since - LOOKBACK))
+    # Remediation work — the trigger's rule-bearing orders, and the door's
+    # work-item orders — is event-driven, never work the cadence due lists
+    # asked for; comparing it would classify every such run as early.
+    runs = [run for run in runs if not is_remediation_run(run)]
     matched, missed, early = compare_runs(ticks, runs, cadence, args.tolerance, since, until)
     same, different = 0, []
     if args.routes:

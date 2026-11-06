@@ -19,7 +19,9 @@ import pytest
 import yaml
 from traust_core.v1.context import Context
 from traust_core.v1.models.common import every_item
+from traust_core.v1.models.identity import ActorKind, Principal
 from traust_core.v1.models.operations import (
+    AssetName,
     JobResult,
     OrderFilter,
     OrderReason,
@@ -27,10 +29,12 @@ from traust_core.v1.models.operations import (
     OrderState,
     Route,
     RunOrder,
+    WorkerId,
 )
 from traust_core.v1.models.values import HttpsRepoUrl
 
 from traust_engine.ops import cli
+from traust_engine.ops.remediation import is_remediation_run
 from traust_engine.ops.shadow import Tick, compare_routes, compare_runs, outcome
 
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
@@ -360,3 +364,50 @@ def test_run_once_plans_and_admits(core: Path, tmp_path: Path) -> None:
     rc, out = _cli(core, "run", "--once", pack=_unrouted_pack(tmp_path))
     assert rc == 0 and json.loads(out)["tick"]["planned"] == 1
     assert [o.asset for o in _orders(core)] == ["feeds_cache"]
+
+
+ENGINE_PRINCIPAL = Principal(identity="traust-engine", kind=ActorKind.MACHINE, display="t")
+
+
+def test_diff_ignores_remediation_runs_as_event_driven_work(core: Path, tmp_path: Path) -> None:
+    """The shadow comparison measures cadence work; a finished remediation order —
+    the trigger's rule-bearing kind — is event-driven work the cadence due lists
+    never asked for, so it is neither early nor missed."""
+    ops = Context.from_file(core).services().ops
+    trigger_rule = "remediation:" + str(uuid4())
+    worker = WorkerId("runner-1")
+    queued = ops.submit(
+        OrderRequest(asset="verify_remediation", priority=1, rule=trigger_rule),
+        ENGINE_PRINCIPAL,
+    )
+    claimed = ops.claim(worker, timedelta(minutes=5), (AssetName("verify_remediation"),))
+    assert claimed is not None and claimed.id == queued.id
+    ops.complete(queued.id, worker, JobResult.succeeded())
+
+    # A shadow pass with nothing cadence-due: the finished remediation run is
+    # event-driven work the due lists never asked for — before the filter it
+    # answered "early" and failed the comparison.
+    shadow = tmp_path / "shadow.jsonl"
+    shadow.write_text(_tick(datetime.now(UTC) - 3 * HOUR).model_dump_json())
+    rc, out = _cli(core, "diff", "--shadow", str(shadow))
+    report = json.loads(out)
+    assert rc == 0, out
+    assert report["early"] == [] and report["missed"] == []
+
+
+def test_which_runs_count_as_remediation_work() -> None:
+    """The trigger's rules and the door's work items mark a run as remediation
+    work; a cadence order carries neither."""
+    assert is_remediation_run(
+        _run("remediate_finding", T0).model_copy(update={"rule": "remediation:" + str(uuid4())})
+    )
+    assert is_remediation_run(
+        _run("verify_remediation", T0).model_copy(
+            update={"rule": "verify-remediation:" + str(uuid4())}
+        )
+    )
+    assert is_remediation_run(
+        _run("remediate_finding", T0).model_copy(update={"work_item_id": uuid4()})
+    )
+    assert not is_remediation_run(_run("feeds_cache", T0))
+    assert not is_remediation_run(_run("verify_remediation", T0))  # the weekly cadence sweep
