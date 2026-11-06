@@ -1,12 +1,15 @@
 """The fourth trigger: remediation assessments and finished remediation runs on the feed
 become remediation and verification orders, read through the remediation service's door
 (REMEDIATION-SCHEDULING-DESIGN.md, "Engine trigger" and "Verification trigger"). The
-scheduling service lands in core beside this; the fakes below stand in for it."""
+scheduling service is core's (core#377, RemediationSchedulingService); the fakes below
+stand in for it — the protocol for the controller's dispatch, the paged door for the CLI
+adapter that wires it in."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -25,9 +28,15 @@ from traust_core.v1.models.operations import (
     RunOrder,
     WorkerId,
 )
+from traust_core.v1.models.remediation_scheduling import (
+    Remediation,
+    RemediationDetail,
+    RemediationFinding,
+)
 from traust_core.v1.models.values import GitSha, HttpsRepoUrl
 from traust_core.v1.models.vocabulary import AssessmentKind, RemediationStatus
 
+from traust_engine.ops import cli
 from traust_engine.ops.controller import ENGINE, Controller
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
@@ -1017,3 +1026,147 @@ def test_a_wake_survives_a_planning_failure(tmp_path: Path) -> None:
     # The next pass dispatches it again — no event, no window: its time had come.
     services.ops.plan = original  # type: ignore[method-assign]
     assert loop.run_once().remediation == 1
+class FakeScheduling:
+    """Core's remediation scheduling service in memory, over core's own row shapes: the
+    paged list and the detail get the adapter reads, a page at a time however small."""
+
+    def __init__(
+        self,
+        scheduled: list[tuple[Remediation, tuple[RemediationFinding, ...]]],
+        page_size: int = 1000,
+    ) -> None:
+        self._rows = sorted(scheduled, key=lambda pair: (pair[0].created_at, pair[0].id))
+        self._findings = {row.id: findings for row, findings in scheduled}
+        self._page_size = page_size
+        self.lists = 0
+        self.gets = 0
+
+    def list(self, page: PageRequest, *, repository_id: UUID | None = None) -> Page[Remediation]:
+        self.lists += 1
+        after = page.position()
+        remaining = [
+            row for row, _ in self._rows if after is None or (row.created_at, row.id) > after
+        ]
+        if repository_id is not None:
+            remaining = [
+                row
+                for row in remaining
+                if any(f.repository_id == repository_id for f in self._findings[row.id])
+            ]
+        take = remaining[: self._page_size]
+        return Page(
+            items=tuple(take),
+            # Core's `Page.of` convention: the cursor names the last taken row, and the
+            # read above resumes strictly past it.
+            next=encode_cursor(take[-1].created_at, take[-1].id)  # type: ignore[arg-type]
+            if len(remaining) > self._page_size
+            else None,
+        )
+
+    def get(self, remediation_id: UUID) -> RemediationDetail:
+        self.gets += 1
+        row = next(row for row, _ in self._rows if row.id == remediation_id)
+        return RemediationDetail(remediation=row, findings=self._findings[remediation_id])
+
+
+def _scheduled(
+    at: datetime,
+    repository_id: UUID,
+    status: RemediationStatus = RemediationStatus.PATCHED,
+    *,
+    assessment_id: UUID | None = None,
+) -> tuple[Remediation, tuple[RemediationFinding, ...]]:
+    """One scheduled remediation with its findings junction, over core's own shapes."""
+    row = Remediation(
+        id=uuid4(),
+        created_at=at,
+        fork_url="https://github.com/example/fork",
+        fork_branch="fix",
+        status=status,
+        assessment_id=assessment_id,
+    )
+    finding = RemediationFinding(
+        id=uuid4(),
+        created_at=at,
+        remediation_id=row.id,
+        finding_id=uuid4(),
+        repository_id=repository_id,
+    )
+    return row, (finding,)
+
+
+def _adapter(scheduling: FakeScheduling) -> cli._CoreRemediations:
+    """The CLI adapter over the fake service, as `_loop` builds it over core's."""
+    core: Any = SimpleNamespace(services=lambda: SimpleNamespace(remediation_scheduling=scheduling))
+    return cli._CoreRemediations(core)
+
+
+def test_the_adapter_maps_a_row_onto_the_protocols_state() -> None:
+    """`state_of` reads the row the assessment names: the repository through the
+    findings junction (the row itself carries none), the status off the row."""
+    repository = uuid4()
+    assessment = uuid4()
+    row, findings = _scheduled(T0, repository, assessment_id=assessment)
+
+    state = _adapter(FakeScheduling([(row, findings)])).state_of(assessment)
+
+    assert state == RemediationState(
+        remediation_id=row.id,
+        assessment_id=assessment,
+        repository_id=repository,
+        status=RemediationStatus.PATCHED,
+    )
+
+
+def test_an_assessment_the_door_never_opened_has_no_state() -> None:
+    row, findings = _scheduled(T0, uuid4())
+
+    assert _adapter(FakeScheduling([(row, findings)])).state_of(uuid4()) is None
+
+
+def test_states_of_names_only_the_repository_asked_for() -> None:
+    """The service's repository filter does the choosing — other repositories' rows never
+    arrive — so no row needs the per-row detail read the assessment walk pays."""
+    repository, other = uuid4(), uuid4()
+    here, here_findings = _scheduled(T0, repository, RemediationStatus.CANDIDATE)
+    there, there_findings = _scheduled(T0 + timedelta(minutes=1), other)
+    scheduling = FakeScheduling([(here, here_findings), (there, there_findings)])
+
+    states = _adapter(scheduling).states_of(repository)
+
+    assert [(s.remediation_id, s.repository_id, s.status) for s in states] == [
+        (here.id, repository, RemediationStatus.CANDIDATE)
+    ]
+    assert scheduling.gets == 0
+
+
+def test_states_of_walks_every_page_of_the_repository() -> None:
+    repository = uuid4()
+    scheduled = [
+        _scheduled(T0 + timedelta(minutes=n), repository, RemediationStatus.PATCHED)
+        for n in range(3)
+    ]
+    scheduling = FakeScheduling(scheduled, page_size=1)
+
+    states = _adapter(scheduling).states_of(repository)
+
+    assert [s.remediation_id for s in states] == [row.id for row, _ in scheduled]
+    assert scheduling.lists == 3
+
+
+def test_state_of_stops_at_the_page_holding_the_match() -> None:
+    """The walk is lazy: a match on the first page reads no further one, and a miss
+    walks the pages that remain."""
+    repository = uuid4()
+    first, first_findings = _scheduled(T0, repository, assessment_id=uuid4())
+    later = [_scheduled(T0 + timedelta(minutes=n + 1), repository) for n in range(2)]
+    scheduling = FakeScheduling([(first, first_findings), *later], page_size=1)
+    adapter = _adapter(scheduling)
+
+    state = adapter.state_of(first.assessment_id)
+
+    assert state is not None and state.remediation_id == first.id
+    assert scheduling.lists == 1
+
+    assert adapter.state_of(uuid4()) is None
+    assert scheduling.lists == 4  # the miss walked the two pages that remained
