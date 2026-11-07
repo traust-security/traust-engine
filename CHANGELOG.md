@@ -6,10 +6,11 @@ All notable changes to traust-engine are documented here.
 
 - Wire the remediation trigger to core's scheduling service: `traust-engine run` and
   `shadow` build the loop's `Remediations` from `RemediationSchedulingService`
-  (traust-core 3dee9835, core#377), so remediation-driven dispatch runs instead of
-  staying dormant. The adapter walks the door's paged rows — by assessment through the
-  findings junction, by repository through the service's own filter — and maps them onto
-  the trigger's state reports.
+  (traust-core 6ead8d83, core#391), so remediation-driven dispatch runs instead of
+  staying dormant. The adapter reads a scheduled effort by its work item — the
+  assessment names it (contracts#117), so `state_of` is the service's keyed get — and
+  the repository's efforts through the service's own filter, mapping them onto the
+  trigger's state reports.
 - A config failure's error line carries the failure's own message — the file and the
   schema rule that failed — instead of the generic "check --core, --pack and the
   configuration files"; foreign exceptions stay bounded to their type and hint, and the
