@@ -32,6 +32,16 @@ RUN uv build --wheel --out-dir /app/dist
 # single self-contained tree (traust-engine console script included).
 RUN uv pip install --no-deps /app/dist/*.whl
 
+# The engine's preflight requires gitleaks; the distroless runtime has no shell or
+# package manager, so the binary ships in the image. It is a build input fetched to
+# the repo root before building — never committed (.gitignore'd; the build context
+# includes it through .containerignore's !gitleaks): the upstream v8.21.2
+# linux-amd64 release artifact. The builder has a shell, so the digest is verified
+# here and the runtime copy below refuses to ship anything else.
+COPY gitleaks /tmp/gitleaks
+RUN echo "50b742abd7daad8bbddb6301f3017efb680632d9a5b3b4d8f137b3aac250e359  /tmp/gitleaks" \
+      | sha256sum -c - && chmod 0555 /tmp/gitleaks
+
 # ── Runtime stage ───────────────────────────────────────────────────
 # Minimal hardened Python runtime. Runs as a non-root user (UID 65532) by
 # default and ships no package manager, so nothing is installed here.
@@ -65,10 +75,9 @@ COPY LICENSE /licenses/LICENSE
 COPY --from=builder /app/.venv /app/.venv
 
 # The engine's preflight requires gitleaks; the distroless runtime has no shell or
-# package manager, so the binary ships in the image. Fetch a release to the repo root
-# before building (validated with v8.21.2) — it is .gitignore'd, never committed; the
-# build context includes it through .containerignore's !gitleaks.
-COPY gitleaks /usr/local/bin/gitleaks
+# package manager, so the binary ships in the image — the copy the builder stage
+# above verified against the pinned v8.21.2 digest.
+COPY --from=builder /tmp/gitleaks /usr/local/bin/gitleaks
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
