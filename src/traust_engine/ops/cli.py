@@ -32,6 +32,7 @@ from traust_core.v1.models.vocabulary import ActorKind
 from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
 from traust_engine.ops.pack import Pack
+from traust_engine.ops.remediation import is_remediation_run
 from traust_engine.ops.runner import Runner, runnable
 from traust_engine.ops.shadow import (
     Diff,
@@ -102,9 +103,14 @@ def _passes(args: argparse.Namespace, core: Context, engine: EngineLoop[Any], sh
                 if shadow:
                     shadow_report = engine.shadow_once()
                     tick = shadow_report.tick
+                    # Only the cadence work feeds the shadow comparison; the
+                    # remediation trigger's orders are event-driven, not work
+                    # cron was scheduled to run.
                     report = Tick(at=core.clock.now(), due=shadow_report.due)
                     status = (
-                        f"shadow,due:{len(report.due)},planned:{tick.planned},"
+                        f"shadow,due:{len(report.due)},"
+                        f"remediation:{len(shadow_report.remediation)},"
+                        f"planned:{tick.planned},"
                         f"routed:{tick.routed},unrouted:{tick.unrouted},"
                         f"refused:{tick.refused_again},stale:{sum(tick.stale.values())},"
                         f"overdue:{sum(tick.overdue.values())},"
@@ -200,6 +206,10 @@ def _diff(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     ticks = [t for t in (Tick.model_validate_json(x) for x in lines if x.strip()) if t.at >= since]
     cadence = {name: a.trigger.every for name, a in pack.assets.items() if a.trigger.every}
     runs = list(recorded_runs(services, since - LOOKBACK))
+    # Remediation work — the trigger's rule-bearing orders, and the door's
+    # work-item orders — is event-driven, never work the cadence due lists
+    # asked for; comparing it would classify every such run as early.
+    runs = [run for run in runs if not is_remediation_run(run)]
     matched, missed, early = compare_runs(ticks, runs, cadence, args.tolerance, since, until)
     same, different = 0, []
     if args.routes:
