@@ -406,8 +406,14 @@ def test_which_runs_count_as_remediation_work() -> None:
             update={"rule": "verify-remediation:" + str(uuid4())}
         )
     )
-    assert is_remediation_run(
-        _run("remediate_finding", T0).model_copy(update={"work_item_id": uuid4()})
-    )
+    if "work_item_id" in RunOrder.model_fields:  # the pin predates core#377's column
+        assert is_remediation_run(
+            _run("remediate_finding", T0).model_copy(update={"work_item_id": uuid4()})
+        )
+    else:  # on the pinned core no order names a work item; the rule alone decides
+        door_shaped = _run("remediate_finding", T0).model_copy(
+            update={"rule": "remediation:" + str(uuid4())}
+        )
+        assert is_remediation_run(door_shaped)
     assert not is_remediation_run(_run("feeds_cache", T0))
     assert not is_remediation_run(_run("verify_remediation", T0))  # the weekly cadence sweep
