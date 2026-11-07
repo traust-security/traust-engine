@@ -55,9 +55,14 @@ def is_remediation_rule(rule: str | None) -> bool:
 def is_remediation_run(order: RunOrder) -> bool:
     """Whether a finished order is remediation work rather than cadence work: the
     trigger's own orders carry its rules, and the scheduling door's orders name a
-    work item. The shadow comparison measures cadence work only. The work-item
-    column is read defensively: this pin predates it (core#377 added it), so on
-    the pinned core no order names one and the rule alone decides."""
+    work item. The shadow comparison measures cadence work only. Every work-item
+    order today is remediation work — the door opens work items for remediations
+    alone — so the classification is exact; if core grows non-remediation work
+    items, this must discriminate before the shadow diff silently shrinks. The
+    work-item column is read defensively because this pin predates it (core#377
+    added it): on the pinned core no order names one and the rule alone decides,
+    and on a pin that carries the column the attribute should be read directly,
+    so drift fails loudly instead of classifying as cadence work."""
     work_item = getattr(order, "work_item_id", None)
     return is_remediation_rule(order.rule) or work_item is not None
 

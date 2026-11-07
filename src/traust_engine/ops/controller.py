@@ -26,7 +26,6 @@ from traust_core.v1.models.operations import (
     OPEN_ORDER_STATES,
     AssetName,
     LaneName,
-    OrderFilter,
     OrderReason,
     OrderRequest,
     OrderState,
@@ -345,10 +344,10 @@ class Controller(Generic[S]):
                 if (assessment := event.assessment) is not None:
                     if assessment.kind == AssessmentKind.REMEDIATION:
                         state = self._assessment_request(
-                            assessment, requests, planned, busy, demanded
+                            assessment, requests, planned, busy, demanded, wake
                         )
                         if state is not None:
-                            self._dispatch(state, requests, planned, busy, demanded)
+                            self._dispatch(state, requests, planned, busy, demanded, wake)
                     elif assessment.kind == AssessmentKind.VERIFICATION:
                         # A recorded verification moved its remediations to revalidated_*;
                         # the verdicts are what name the repository to re-check.
@@ -375,10 +374,10 @@ class Controller(Generic[S]):
             if page.next is None:
                 break
         for repository_id in recheck:
-            self._recheck(repository_id, requests, planned, busy, demanded)
+            self._recheck(repository_id, requests, planned, busy, demanded, wake)
         if fleet_wide:
             for repository_id in self._repositories():
-                self._recheck(repository_id, requests, planned, busy, demanded)
+                self._recheck(repository_id, requests, planned, busy, demanded, wake)
         # A woken deferral survives its pass unless the pass proves the demand
         # satisfied: a repository the pass dispatched for keeps its wake (a
         # planning failure after this return then finds it intact next pass —
@@ -398,31 +397,34 @@ class Controller(Generic[S]):
         planned: set[tuple[AssetName, UUID | None]],
         busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
         demanded: set[UUID],
+        wake: bool = True,
     ) -> RemediationState | None:
         """One remediation assessment on the feed: the remediation order for a request the
         scheduling door left without one, and the assessment's current state."""
         assert assessment.id is not None and self._remediations is not None
         state = self._remediations.state_of(assessment.id)
         if (
-            assessment.status == RemediationStatus.CANDIDATE
+            state is not None
+            and assessment.status == RemediationStatus.CANDIDATE
             and assessment.run_order_id is None
-            and (state is None or state.status == RemediationStatus.CANDIDATE)
+            and state.status == RemediationStatus.CANDIDATE
         ):
             # The door creates the assessment and its order atomically; one without an
             # order was opened beside it, so the engine submits the order itself — unless
             # the remediation has already moved on (a replayed event) or one is open.
-            repository_id = (
-                state.repository_id if state is not None else self._repository_of(assessment)
-            )
-            named = state.remediation_id if state is not None else assessment.id
+            # The order is keyed by the row's remediation_id — the same key a recheck's
+            # dispatch and the retry window use — and an assessment with no row is not
+            # the engine's to plan: no state keys its retry window or reattempts, and
+            # the record door would have no row to move when the run lands.
             self._request(
                 REMEDIATE_ASSET,
-                repository_id,
-                f"remediation:{named}",
+                state.repository_id,
+                f"remediation:{state.remediation_id}",
                 requests,
                 planned,
                 busy,
                 demanded,
+                wake,
             )
         return state
 
@@ -433,13 +435,14 @@ class Controller(Generic[S]):
         planned: set[tuple[AssetName, UUID | None]],
         busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
         demanded: set[UUID],
+        wake: bool = True,
     ) -> None:
         """Re-read the repository's remediations and dispatch whatever their current
         status calls for."""
         if repository_id is None or self._remediations is None:
             return
         for state in self._remediations.states_of(repository_id):
-            self._dispatch(state, requests, planned, busy, demanded)
+            self._dispatch(state, requests, planned, busy, demanded, wake)
 
     def _dispatch(
         self,
@@ -448,13 +451,22 @@ class Controller(Generic[S]):
         planned: set[tuple[AssetName, UUID | None]],
         busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
         demanded: set[UUID],
+        wake: bool = True,
     ) -> None:
         """The order a remediation's current status calls for: verification once it is
         implemented, another attempt while verification still finds it vulnerable and the
         limit has not been reached, and the remediation order a candidate still waits on
         (one the door left unpaired, or whose earlier attempt is past its retry window).
         `revalidated_fixed` waits for SCI's filing loop; every other status waits on its
-        own actor."""
+        own actor.
+
+        A candidate the door paired with an order is dispatched here too, once that
+        order is no longer open: the door submits its order once, so a door order that
+        finishes without a verdict is re-planned by the engine — deliberately, and
+        immediately, because the door's order carries no rule to key a retry window on
+        and attributing one to it would be guessing core's bookkeeping. The engine's own
+        re-plan then carries the rule, and its failures wait out the window like any
+        other attempt."""
         if state.status == RemediationStatus.CANDIDATE:
             self._request(
                 REMEDIATE_ASSET,
@@ -464,6 +476,7 @@ class Controller(Generic[S]):
                 planned,
                 busy,
                 demanded,
+                wake,
             )
         elif state.status in (RemediationStatus.PATCHED, RemediationStatus.CHECKS_PASSED):
             self._request(
@@ -474,6 +487,7 @@ class Controller(Generic[S]):
                 planned,
                 busy,
                 demanded,
+                wake,
             )
         elif (
             state.status == RemediationStatus.REVALIDATED_STILL_VULNERABLE
@@ -487,6 +501,7 @@ class Controller(Generic[S]):
                 planned,
                 busy,
                 demanded,
+                wake,
             )
 
     def _request(
@@ -498,14 +513,17 @@ class Controller(Generic[S]):
         planned: set[tuple[AssetName, UUID | None]],
         busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
         demanded: set[UUID],
+        wake: bool = True,
     ) -> bool:
         """Plan one order of `asset` for the repository, unless the pack runs no such
         asset, one is already open for the subject, an attempt of this very remediation
         the retry window has not outlived holds it, or this pass already planned it.
         Demand an attempt holds is deferred with a wake-up, not dropped: the first pass
         after the window dispatches it (a restart loses the memory, but its full replay
-        re-derives it). Returns whether the repository's demand was served — dispatched
-        or deferred — so a woken deferral knows its pass owed it something."""
+        re-derives it). A preview (`wake=False`) reads the same window but writes no
+        deferral — the shadow consumes nothing. Returns whether the repository's demand
+        was served — dispatched or deferred — so a woken deferral knows its pass owed it
+        something."""
         spec = self._pack.assets.get(asset)
         if spec is None or not spec.enabled:
             log.warning(
@@ -531,20 +549,33 @@ class Controller(Generic[S]):
             # becomes eligible, not a full window after the pass that noticed it.
             window_start = self._clock.now() - RETRY_AFTER
             attempted: dict[str, datetime] = {}
-            # The remediation assets are event-driven and low-volume, so paging
-            # their attempted orders and keeping those inside the window is exact
-            # where subjects() would say only that one exists. Orders without a
-            # trigger rule are not this remediation's to wait for.
-            for order in every_item(
-                lambda page: self._ops.list(OrderFilter(states=ATTEMPTED, asset=asset), page)
-            ):
-                if (
-                    order.rule is not None
-                    and order.finished_at is not None
-                    and order.finished_at > window_start
-                    and (order.rule not in attempted or order.finished_at > attempted[order.rule])
-                ):
-                    attempted[order.rule] = order.finished_at
+            # The window is pushed server-side: the feed's change order is seeded at
+            # the window's start, so the scan reads only the orders that changed
+            # inside it — every order that finished inside the window changed then —
+            # instead of paging the asset's every attempted order ever (`list`
+            # refuses a window; it pages created_at). The finished_at, rule and asset
+            # filters stay: a change inside the window that is not a finish of this
+            # asset's defers nothing, and orders without a trigger rule are not this
+            # remediation's to wait for.
+            position: tuple[datetime, UUID] | None = (window_start, UUID(int=0))
+            while position is not None:
+                batch = self._ops.feed_after(position, FEED_PAGE)
+                for order in batch:
+                    if (
+                        order.asset == asset
+                        and order.rule is not None
+                        and order.finished_at is not None
+                        and order.finished_at > window_start
+                        and (
+                            order.rule not in attempted or order.finished_at > attempted[order.rule]
+                        )
+                    ):
+                        attempted[order.rule] = order.finished_at
+                if len(batch) == FEED_PAGE:
+                    assert batch[-1].updated_at is not None and batch[-1].id is not None
+                    position = (batch[-1].updated_at, batch[-1].id)
+                else:
+                    position = None
             busy[asset] = (self._ops.subjects(asset, OPEN_ORDER_STATES), attempted)
         open_, attempted = busy[asset]
         if subject in open_ or (asset, subject) in planned:
@@ -552,10 +583,15 @@ class Controller(Generic[S]):
         if (attempted_at := attempted.get(rule)) is not None:
             # The repository the demand is about — the one whose states a wake
             # rechecks — keeps the earliest wake; a later demand for the same
-            # repository never postpones it.
+            # repository never postpones it. A preview writes no deferral: the
+            # shadow's cursor has passed the event that created the demand, so
+            # only the live pass may own its wake.
             ready = attempted_at + RETRY_AFTER
             if repository_id is not None:
-                self._deferred[repository_id] = min(self._deferred.get(repository_id, ready), ready)
+                if wake:
+                    self._deferred[repository_id] = min(
+                        self._deferred.get(repository_id, ready), ready
+                    )
                 demanded.add(repository_id)
             return True
         planned.add((asset, subject))

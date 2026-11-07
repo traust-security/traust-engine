@@ -200,11 +200,27 @@ def test_a_remediation_request_without_its_order_plans_the_remediation_order(
     services = _context(tmp_path, clock).services()
     repository, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
+    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
-    requests = _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations()))
+    requests = _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations(state)))
 
-    assert requests == [("remediate_finding", repository, f"remediation:{assessment.id}")]
+    # Keyed by the row's remediation_id — the same key a recheck's dispatch and
+    # the retry window use, so a later failure of this order defers its re-run.
+    assert requests == [("remediate_finding", repository, f"remediation:{state.remediation_id}")]
+
+
+def test_an_assessment_without_a_remediation_row_plans_nothing(tmp_path: Path) -> None:
+    """A candidate assessment the scheduling service holds no row for is not the
+    engine's to plan: no state keys its retry window or reattempts, and the record
+    door would have no row to move when the run lands."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _, ref = _repository(services)
+    assessment = _assessment(T0, repository_ref_id=ref)
+    feed = FakeFeed([FeedEvent(assessment=assessment)])
+
+    assert _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations())) == []
 
 
 def test_a_remediation_request_the_door_paired_with_an_order_plans_nothing(
@@ -552,6 +568,32 @@ def test_the_shadow_reports_the_remediation_orders_a_pass_would_plan(tmp_path: P
 
     report = loop.run_once()
     assert report.remediation == 1
+
+
+def test_the_shadow_writes_no_deferral(tmp_path: Path) -> None:
+    """A preview computes the same demand a live pass would, but a deferral is live
+    state: a shadow that wrote one would wake a repository the live pass — whose
+    cursor may have passed the creating event — never asked for."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    repository, ref = _repository(services)
+    assessment = _assessment(T0, repository_ref_id=ref)
+    state = _state(repository, RemediationStatus.CANDIDATE, assessment_id=assessment.id)
+    pack = _pack(tmp_path)
+    loop = EngineLoop(services, clock, pack, remediations=FakeRemediations(state))
+    loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
+    assert loop.run_once().remediation == 1
+    (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
+    _run(services, order, JobResult.succeeded())
+
+    # The run landed without a record: a live pass over the finishing event would
+    # defer the still-candidate demand — the preview must leave no deferral.
+    loop._controller._feed = FakeFeed(  # type: ignore[assignment]
+        [FeedEvent(order=_order(T0 + timedelta(minutes=1), repository_id=repository))]
+    )
+    shadow = loop.shadow_once()
+    assert shadow.remediation == ()
+    assert loop._controller._deferred == {}
 
 
 def test_the_shadow_does_not_consume_deferred_demand(tmp_path: Path) -> None:
