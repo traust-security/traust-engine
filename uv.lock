@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -948,7 +948,7 @@ dependencies = [
 [[package]]
 name = "traust-core"
 version = "0.1.0"
-source = { git = "https://github.com/traust-security/traust-core.git?rev=d7564cd5a28dbd3ceca86bf80e04687d3ec675a8#d7564cd5a28dbd3ceca86bf80e04687d3ec675a8" }
+source = { git = "https://github.com/traust-security/traust-core.git?rev=0301f6e6652db093a1a35bc474f81f1cffa07768#0301f6e6652db093a1a35bc474f81f1cffa07768" }
 dependencies = [
     { name = "jsonschema", extra = ["format-nongpl"] },
     { name = "pydantic" },
@@ -993,7 +993,7 @@ dev = [
 requires-dist = [
     { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "traust-core", extras = ["postgres"], git = "https://github.com/traust-security/traust-core.git?rev=d7564cd5a28dbd3ceca86bf80e04687d3ec675a8" },
+    { name = "traust-core", extras = ["postgres"], git = "https://github.com/traust-security/traust-core.git?rev=0301f6e6652db093a1a35bc474f81f1cffa07768" },
 ]
 
 [package.metadata.requires-dev]
