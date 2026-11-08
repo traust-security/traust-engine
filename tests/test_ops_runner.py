@@ -23,7 +23,8 @@ import pytest
 import yaml
 from traust_core.v1.context import Config, Context
 from traust_core.v1.models.common import every_item
-from traust_core.v1.models.identity import Principal
+from traust_core.v1.models.identity import IdentitySource, Principal
+from traust_core.v1.models.inventory import RefName
 from traust_core.v1.models.operations import (
     JobResult,
     LaneName,
@@ -37,7 +38,7 @@ from traust_core.v1.models.operations import (
     SkillName,
     WorkerId,
 )
-from traust_core.v1.models.values import HttpsRepoUrl
+from traust_core.v1.models.values import GitSha, HttpsRepoUrl
 from traust_core.v1.models.vocabulary import ActorKind
 from traust_core.v1.repositories.contract import SqlTraustUnitOfWork
 
@@ -48,7 +49,12 @@ from traust_engine.ops.runner import Runner, UnresolvedParam, argv, runnable
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 MODELS = Path(__file__).parent / "fixtures" / "config" / "model-registry.yaml"
 WORKER = WorkerId("runner-1")
-OPERATOR = Principal(identity="op@example.com", kind=ActorKind.HUMAN, display="op")
+OPERATOR = Principal(
+    identity="op@example.com",
+    kind=ActorKind.HUMAN,
+    display="op",
+    verified_by=IdentitySource.OIDC,  # core's submit door asks a verified person
+)
 HOSTS = ("github.com",)
 
 
@@ -84,7 +90,12 @@ def _submit(
     repository_id = None
     if repo:
         url = HttpsRepoUrl.parse("https://github.com/example/app", HOSTS)
-        repository_id = services.portfolio.register_repository(url, public=True).id
+        repository = services.portfolio.register_repository(url, public=True)
+        assert repository.id is not None
+        # The subject gate an order's submit enforces: a repository registered alone is
+        # no subject until its default line is imported (core's onboarding rule).
+        services.portfolio.mark_default_branch(repository.id, GitSha("a" * 40), RefName("main"))
+        repository_id = repository.id
     request = OrderRequest(asset=asset, priority=priority, repository_id=repository_id, rule=rule)
     return services.ops.submit(request, OPERATOR)
 
@@ -403,6 +414,11 @@ def _repository(context: Context, path: str = "example/app") -> UUID:
     url = HttpsRepoUrl.parse(f"https://github.com/{path}", HOSTS)
     repository = context.services().portfolio.register_repository(url, public=True)
     assert repository.id is not None
+    # The subject gate an order's submit enforces: a repository registered alone is
+    # no subject until its default line is imported (core's onboarding rule).
+    context.services().portfolio.mark_default_branch(
+        repository.id, GitSha("a" * 40), RefName("main")
+    )
     return repository.id
 
 

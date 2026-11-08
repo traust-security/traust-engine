@@ -20,7 +20,7 @@ from traust_core.v1.context import (
     current_correlation,
 )
 from traust_core.v1.errors import ConflictError
-from traust_core.v1.models.identity import Principal
+from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.operations import JobResult, OrderRequest, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
@@ -36,7 +36,12 @@ PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 SECRET = "synthetic-secret-never-log"
 PRIVATE_URL = f"https://user:{SECRET}@private.example.test/repository"
 WORKER = WorkerId("logging-runner")
-OPERATOR = Principal(identity="operator@example.test", kind=ActorKind.HUMAN, display="operator")
+OPERATOR = Principal(
+    identity="operator@example.test",
+    kind=ActorKind.HUMAN,
+    display="operator",
+    verified_by=IdentitySource.OIDC,  # core's submit door asks a verified person
+)
 
 
 def _core_file(
@@ -331,17 +336,41 @@ def test_shadow_once_includes_tick_diagnostics_in_its_terminal_summary(
 def test_preflight_failure_is_bounded_and_terminal(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A pack that fails its schema leaves one line carrying the failure's own words —
+    the file and the first rule it broke, where the generic hint once hid them — and
+    nothing else: no traceback, a terminal exit, a log without the message."""
     log_file = tmp_path / "preflight.log"
     core_file = _core_file(tmp_path, log_file)
-    bad_pack = tmp_path / f"{SECRET}.yaml"
-    bad_pack.write_text(f"assets: {SECRET}")
+    bad_pack = tmp_path / "bad-pack.yaml"
+    bad_pack.write_text("assets: {}")
     assert cli.main(["run", "--once", "--core", str(core_file), "--pack", str(bad_pack)]) == 2
     captured = capsys.readouterr()
-    assert "startup failed" in captured.err and SECRET not in captured.err
+    assert "startup failed (ConfigError)" in captured.err
+    assert "bad-pack.yaml" in captured.err and "'pack' is a required property" in captured.err
+    assert len(captured.err.splitlines()) == 1 and "Traceback" not in captured.err
     rows = _rows(log_file)
     startup = [row for row in rows if row["operation"] == "engine.startup"]
     assert len(startup) == 1
     assert (startup[0]["outcome"], startup[0]["reason"]) == ("failed", "preflight_error")
+    assert "'pack' is a required property" not in log_file.read_text()
+
+
+def test_a_malformed_pack_leaks_no_file_content(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pack that is not valid YAML leaves one line naming the file and the break's
+    position — and nothing from the file itself: the offending snippet a YAML error's
+    message would echo (a credential, a path) never reaches stderr or the log."""
+    log_file = tmp_path / "malformed.log"
+    core_file = _core_file(tmp_path, log_file)
+    bad_pack = tmp_path / "leaky-pack.yaml"
+    bad_pack.write_text(f"assets: {{\n  scan: {SECRET}\n")
+    assert cli.main(["run", "--once", "--core", str(core_file), "--pack", str(bad_pack)]) == 2
+    captured = capsys.readouterr()
+    assert "startup failed (ConfigError)" in captured.err
+    assert "leaky-pack.yaml" in captured.err and "YAML syntax error at line" in captured.err
+    assert SECRET not in captured.err
+    assert len(captured.err.splitlines()) == 1 and "Traceback" not in captured.err
     assert SECRET not in log_file.read_text()
 
 

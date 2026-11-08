@@ -32,6 +32,25 @@ RUN uv build --wheel --out-dir /app/dist
 # single self-contained tree (traust-engine console script included).
 RUN uv pip install --no-deps /app/dist/*.whl
 
+# The engine's preflight requires gitleaks; the distroless runtime has no shell or
+# package manager, so the binary ships in the image. It is a build input fetched to
+# the repo root before building — never committed (.gitignore'd; the build context
+# includes it through .containerignore's !gitleaks): the upstream v8.30.1 release
+# artifact for the build's target architecture (`make gitleaks` fetches and verifies
+# the build machine's; a cross-build passes ARCH=<TARGETARCH>, and a multi-arch
+# build fetches per arch in its build step). The
+# builder has a shell, so the digest is verified here against the TARGETARCH pin and
+# the runtime copy below refuses to ship anything else.
+ARG TARGETARCH=amd64
+COPY gitleaks /tmp/gitleaks
+RUN case "$TARGETARCH" in \
+      amd64) echo "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509" ;; \
+      arm64) echo "00e91bbe655bd7c47753e8cfe61cb76ea1a5d7e7702fe161ee40102b46b3823b" ;; \
+      *) echo "unsupported gitleaks arch: $TARGETARCH" >&2; exit 1 ;; \
+    esac > /tmp/gitleaks.sha256 \
+    && sed 's|$|  /tmp/gitleaks|' /tmp/gitleaks.sha256 | sha256sum -c - \
+    && chmod 0555 /tmp/gitleaks
+
 # ── Runtime stage ───────────────────────────────────────────────────
 # Minimal hardened Python runtime. Runs as a non-root user (UID 65532) by
 # default and ships no package manager, so nothing is installed here.
@@ -63,6 +82,11 @@ LABEL org.opencontainers.image.source="https://github.com/traust-security/traust
 COPY LICENSE /licenses/LICENSE
 
 COPY --from=builder /app/.venv /app/.venv
+
+# The engine's preflight requires gitleaks; the distroless runtime has no shell or
+# package manager, so the binary ships in the image — the copy the builder stage
+# above verified against the pinned v8.30.1 digest.
+COPY --from=builder /tmp/gitleaks /usr/local/bin/gitleaks
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \

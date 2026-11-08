@@ -349,8 +349,9 @@ class Controller(Generic[S]):
                         if state is not None:
                             self._dispatch(state, requests, planned, busy, demanded, wake)
                     elif assessment.kind == AssessmentKind.VERIFICATION:
-                        # A recorded verification moved its remediations to revalidated_*;
-                        # the verdicts are what name the repository to re-check.
+                        # A recorded verification's verdicts fold into the efforts'
+                        # effective statuses at read; the verdicts are what name the
+                        # repository to re-check.
                         if (repository_id := self._repository_of(assessment)) is not None:
                             recheck[repository_id] = None
                 elif (
@@ -409,13 +410,13 @@ class Controller(Generic[S]):
             and assessment.run_order_id is None
             and state.status == RemediationStatus.CANDIDATE
         ):
-            # The door creates the assessment and its order atomically; one without an
-            # order was opened beside it, so the engine submits the order itself — unless
-            # the remediation has already moved on (a replayed event) or one is open.
-            # The order is keyed by the row's remediation_id — the same key a recheck's
-            # dispatch and the retry window use — and an assessment with no row is not
-            # the engine's to plan: no state keys its retry window or reattempts, and
-            # the record door would have no row to move when the run lands.
+            # The door opens the work item and submits its order atomically; one without
+            # an order was opened beside it, so the engine submits the order itself —
+            # unless the effort has already moved on (a replayed event) or one is open.
+            # The order is keyed by the work item — the same key a recheck's dispatch
+            # and the retry window use — and an assessment with no effort is not the
+            # engine's to plan: no state keys its retry window or reattempts, and no
+            # order would carry the fork facts a run needs to do the work.
             self._request(
                 REMEDIATE_ASSET,
                 state.repository_id,
@@ -437,7 +438,7 @@ class Controller(Generic[S]):
         demanded: set[UUID],
         wake: bool = True,
     ) -> None:
-        """Re-read the repository's remediations and dispatch whatever their current
+        """Re-read the repository's scheduled efforts and dispatch whatever their current
         status calls for."""
         if repository_id is None or self._remediations is None:
             return
@@ -453,7 +454,7 @@ class Controller(Generic[S]):
         demanded: set[UUID],
         wake: bool = True,
     ) -> None:
-        """The order a remediation's current status calls for: verification once it is
+        """The order an effort's effective status calls for: verification once it is
         implemented, another attempt while verification still finds it vulnerable and the
         limit has not been reached, and the remediation order a candidate still waits on
         (one the door left unpaired, or whose earlier attempt is past its retry window).
@@ -595,11 +596,11 @@ class Controller(Generic[S]):
                 demanded.add(repository_id)
             return True
         planned.add((asset, subject))
+        if repository_id is not None:
+            demanded.add(repository_id)
         requests.append(
             OrderRequest(asset=asset, priority=spec.priority, repository_id=subject, rule=rule)
         )
-        if repository_id is not None:
-            demanded.add(repository_id)
         return True
 
     def _repository_of(self, assessment: Assessment) -> UUID | None:

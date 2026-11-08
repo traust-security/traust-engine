@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from traust_core.v1.context import Config, Context, LoggingConfig, Services, correlation_scope
 from traust_core.v1.errors import ValidationError
-from traust_core.v1.models.identity import Principal
+from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.operations import JobResult, OrderRequest, OrderState, RunOrder, WorkerId
 from traust_core.v1.models.vocabulary import ActorKind
 
@@ -20,7 +20,12 @@ from traust_engine.ops.shadow import record
 
 SECRET = "synthetic-secret-never-log"
 WORKER = WorkerId("completion-test")
-OPERATOR = Principal(identity="operator@example.test", kind=ActorKind.HUMAN, display="operator")
+OPERATOR = Principal(
+    identity="operator@example.test",
+    kind=ActorKind.HUMAN,
+    display="operator",
+    verified_by=IdentitySource.OIDC,  # core's submit door asks a verified person
+)
 PACK = Pack.model_validate(
     {"pack": "completion-test", "assets": {"feeds_cache": {"run": ["fixture-command"]}}}
 )

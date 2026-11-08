@@ -1,9 +1,9 @@
 """The fourth trigger: remediation-driven work, read off the ops feed.
 
-The remediation pipeline's pieces — the scheduling door that opens a remediation with its
-assessment and order, the runner, the record door, verification, SCI's filing loop — all
-exist or land with traust-core's `RemediationSchedulingService`; nothing started them
-automatically before this. The engine never writes the remediation table: it reads the
+The remediation pipeline's pieces — the scheduling door that opens the work item and
+submits the order carrying its fork facts, the runner, the record door, verification,
+SCI's filing loop — all live with traust-core's `RemediationSchedulingService`; nothing
+started them automatically before this. The engine never creates an effort: it reads the
 feed, asks the service below for current state, and plans orders the same admission gate
 admits as the tick's (REMEDIATION-SCHEDULING-DESIGN.md, "Engine trigger")."""
 
@@ -68,30 +68,37 @@ def is_remediation_run(order: RunOrder) -> bool:
 
 
 class RemediationState(Model):
-    """One remediation's current state as core reads it: the row the scheduling door
-    creates, the status the record and verification doors move (an explicitly maintained
-    view of the decisions), and how many remediation attempts have run. Read-only to the
-    engine; core derives `reattempts` from the remediation's orders, so every order this
-    trigger plans for it carries `rule = "remediation:<remediation_id>"`."""
+    """One scheduled effort's current state as core reads it: the work item the effort is
+    (a `remediation` assessment, its status the fold of its decisions and the verification
+    verdicts on its fix), the repository its findings belong to, and how many remediation
+    attempts have run. `remediation_id` is the work item's id — the effort's handle, and
+    the assessment's: the work item IS the assessment (contracts#117), so the feed's events
+    name the effort they moved. Read-only to the engine; core derives `reattempts` from the
+    effort's orders, so every order this trigger plans for it carries
+    `rule = "remediation:<remediation_id>"`."""
 
     remediation_id: UUID
-    assessment_id: UUID | None = None
     repository_id: UUID
     status: RemediationStatus
+    #: Prior attempts of the effort's findings, as core models them: an attempt that is
+    #: over is retried as a new work item over the same findings, so the count is the
+    #: repository's over efforts sharing a finding. The adapter computes it on the
+    #: repository listing; the feed-driven keyed read has no siblings and reads zero.
     reattempts: int = 0
 
 
 class Remediations(Protocol):
-    """The remediation-table reads the trigger needs; core's remediation scheduling
-    service (the door that creates the row with its assessment and order, and the status
-    sync that moves it) satisfies this once it lands."""
+    """The scheduled-effort reads the trigger needs; core's remediation scheduling service
+    (the door that opens the work item and submits the order carrying its fork facts, and
+    the read fold that carries its status) satisfies this."""
 
     def state_of(self, assessment_id: UUID) -> RemediationState | None:
-        """The remediation of `assessment_id`, None when the assessment has no row — it
-        was not opened through the scheduling door."""
+        """The scheduled effort of `assessment_id` — the work item the assessment is — None
+        when the assessment is no effort: no work item, or no order carrying its fork facts
+        (it was not opened through the scheduling door)."""
         ...
 
     def states_of(self, repository_id: UUID) -> list[RemediationState]:
-        """Every remediation of the repository, whatever its status: what a finished
+        """Every scheduled effort of the repository, whatever its status: what a finished
         remediation run or a recorded verification may have moved."""
         ...
