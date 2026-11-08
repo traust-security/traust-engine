@@ -34,7 +34,7 @@ from traust_core.v1.models.operations import (
 from traust_core.v1.models.values import HttpsRepoUrl
 
 from traust_engine.ops import cli
-from traust_engine.ops.remediation import is_remediation_run
+from traust_engine.ops.controller import is_remediation_run
 from traust_engine.ops.shadow import Tick, compare_routes, compare_runs, outcome
 
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
