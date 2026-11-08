@@ -355,6 +355,25 @@ def test_preflight_failure_is_bounded_and_terminal(
     assert "'pack' is a required property" not in log_file.read_text()
 
 
+def test_a_malformed_pack_leaks_no_file_content(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pack that is not valid YAML leaves one line naming the file and the break's
+    position — and nothing from the file itself: the offending snippet a YAML error's
+    message would echo (a credential, a path) never reaches stderr or the log."""
+    log_file = tmp_path / "malformed.log"
+    core_file = _core_file(tmp_path, log_file)
+    bad_pack = tmp_path / "leaky-pack.yaml"
+    bad_pack.write_text(f"assets: {{\n  scan: {SECRET}\n")
+    assert cli.main(["run", "--once", "--core", str(core_file), "--pack", str(bad_pack)]) == 2
+    captured = capsys.readouterr()
+    assert "startup failed (ConfigError)" in captured.err
+    assert "leaky-pack.yaml" in captured.err and "YAML syntax error at line" in captured.err
+    assert SECRET not in captured.err
+    assert len(captured.err.splitlines()) == 1 and "Traceback" not in captured.err
+    assert SECRET not in log_file.read_text()
+
+
 def test_router_setup_failure_has_no_false_ready_or_raw_traceback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

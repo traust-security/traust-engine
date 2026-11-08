@@ -181,8 +181,27 @@ class Pack(Dto):
             return cls.model_validate(raw).model_copy(
                 update={"digest": sha256_hex(data), "pins": pinned}
             )
-        except (OSError, yaml.YAMLError, DocumentError, pydantic.ValidationError) as e:
+        except DocumentError as e:
+            # Core's own schema rejection: its message names the file and the rule,
+            # written for this line — the diagnostic a config failure exists to carry.
             raise ConfigError(f"{path}: {e}") from e
+        except yaml.YAMLError as e:
+            # A YAML failure's message echoes the file's own content (the offending
+            # snippet), so the line carries the position alone — enough to find the
+            # break, nothing from the file itself.
+            mark = getattr(e, "problem_mark", None)
+            where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+            raise ConfigError(f"{path}: YAML syntax error{where}") from e
+        except pydantic.ValidationError as e:
+            # A model rejection's rendered message echoes the validated input values;
+            # the line carries the first break's place and the validator's own words
+            # (our validators' wording, or pydantic's kind), never the value itself.
+            first = e.errors()[0] if e.errors() else {}
+            loc = ".".join(str(part) for part in first.get("loc", ())) or "?"
+            kind = first.get("msg", first.get("type", "invalid"))
+            raise ConfigError(f"{path}: {kind} at {loc}") from e
+        except OSError as e:
+            raise ConfigError(f"{path}: {type(e).__name__}") from e
 
 
 def _digest(pin: Path) -> Sha256:

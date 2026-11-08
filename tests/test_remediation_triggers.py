@@ -202,18 +202,17 @@ def _orders(services: Services, *states: OrderState) -> list[RunOrder]:
     return list(every_item(lambda p: services.ops.list(OrderFilter(states=states), p)))
 
 
-def test_a_remediation_request_without_its_order_plans_the_remediation_order(
-    tmp_path: Path,
-) -> None:
+def test_an_assessment_without_a_scheduled_effort_plans_nothing(tmp_path: Path) -> None:
+    """A candidate assessment the scheduling service holds no effort for is not the
+    engine's to plan: no state keys its retry window or reattempts, and an order
+    without the effort's fork facts cannot do the work."""
     clock = Clock()
     services = _context(tmp_path, clock).services()
-    repository, ref = _repository(services)
+    _, ref = _repository(services)
     assessment = _assessment(T0, repository_ref_id=ref)
     feed = FakeFeed([FeedEvent(assessment=assessment)])
 
-    requests = _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations()))
-
-    assert requests == [("remediate_finding", repository, f"remediation:{assessment.id}")]
+    assert _dispatched(_controller(services, _pack(tmp_path), feed, FakeRemediations())) == []
 
 
 def test_a_remediation_request_the_door_paired_with_an_order_plans_nothing(
@@ -973,12 +972,113 @@ class FakeScheduling:
         raise NotFoundError(f"work item {work_item_id} schedules no remediation")
 
 
+def test_an_unrelated_remediation_does_not_wait_out_another_attempt(
+    tmp_path: Path,
+) -> None:
+    """The retry window is the remediation's own, not the repository's: a candidate
+    whose remediation never ran dispatches right after an unrelated order of the
+    same repository finishes — only the open-order serialization applies."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    repository, ref = _repository(services)
+    first = _assessment(T0, repository_ref_id=ref)
+    second = _assessment(T0 + timedelta(minutes=1), repository_ref_id=ref)
+    first_state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=first.id)
+    second_state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=second.id)
+    pack = _pack(tmp_path)
+    controller = _controller(
+        services,
+        pack,
+        FakeFeed([FeedEvent(assessment=first)]),
+        FakeRemediations(first_state, second_state),
+        clock,
+    )
+    assert _planned(controller, services, pack) == [
+        ("remediate_finding", repository, f"remediation:{first_state.remediation_id}")
+    ]
+    (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
+    _run(services, order, JobResult.succeeded())
+
+    # Minutes later — deep inside the first attempt's retry window — the second
+    # candidate's event arrives: it dispatches now, not after the hour.
+    clock.at = T0 + timedelta(minutes=5)
+    controller._feed = FakeFeed([FeedEvent(assessment=second)])  # type: ignore[assignment]
+    assert _planned(controller, services, pack) == [
+        ("remediate_finding", repository, f"remediation:{second_state.remediation_id}")
+    ]
+
+
+def test_a_wake_survives_a_planning_failure(tmp_path: Path) -> None:
+    """A matured wake whose pass fails to plan is not lost: the wake is kept until a
+    pass proves the demand satisfied, so the next pass — whose cursor is past the
+    creating event — still dispatches it, immediately (its ready_at has passed)."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    repository, ref = _repository(services)
+    assessment = _assessment(T0, repository_ref_id=ref)
+    state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=assessment.id)
+    pack = _pack(tmp_path)
+    loop = EngineLoop(services, clock, pack, remediations=FakeRemediations(state))
+    loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
+    assert loop.run_once().remediation == 1
+    (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
+    _run(services, order, JobResult.succeeded())
+    loop._controller._feed = FakeFeed(  # type: ignore[assignment]
+        [FeedEvent(order=_order(T0 + timedelta(minutes=1), repository_id=repository))]
+    )
+    loop.run_once()  # the run landed without a record: the candidate demand defers
+    clock.at = T0 + timedelta(hours=2)  # the wake matures
+
+    # The wake's pass dispatches, and planning fails after it: the wake survives.
+    loop._controller._feed = FakeFeed([])  # type: ignore[assignment]
+    original = services.ops.plan
+
+    def failing(request: OrderRequest, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("planning failed")
+
+    services.ops.plan = failing  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="planning failed"):
+        loop.run_once()
+    assert loop._controller._deferred  # the wake is still there
+
+    # The next pass dispatches it again — no event, no window: its time had come.
+    services.ops.plan = original  # type: ignore[method-assign]
+    assert loop.run_once().remediation == 1
+
+
+def test_the_shadow_writes_no_deferral(tmp_path: Path) -> None:
+    """A preview computes the same demand a live pass would, but a deferral is live
+    state: a shadow that wrote one would wake a repository the live pass — whose
+    cursor may have passed the creating event — never asked for."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    repository, ref = _repository(services)
+    assessment = _assessment(T0, repository_ref_id=ref)
+    state = _state(repository, RemediationStatus.CANDIDATE, remediation_id=assessment.id)
+    pack = _pack(tmp_path)
+    loop = EngineLoop(services, clock, pack, remediations=FakeRemediations(state))
+    loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
+    assert loop.run_once().remediation == 1
+    (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
+    _run(services, order, JobResult.succeeded())
+
+    # The run landed without a record: a live pass over the finishing event would
+    # defer the still-candidate demand — the preview must leave no deferral.
+    loop._controller._feed = FakeFeed(  # type: ignore[assignment]
+        [FeedEvent(order=_order(T0 + timedelta(minutes=1), repository_id=repository))]
+    )
+    shadow = loop.shadow_once()
+    assert shadow.remediation == ()
+    assert loop._controller._deferred == {}
+
+
 def _effort(
     at: datetime,
     repository_id: UUID,
     status: RemediationStatus = RemediationStatus.PATCHED,
     *,
     work_item_id: UUID | None = None,
+    finding_ids: tuple[UUID, ...] | None = None,
 ) -> ScheduledEffort:
     """One scheduled effort over core's own shapes: its work item (the assessment) with
     the order's fork facts and the repository the effort names, at its effective status —
@@ -987,7 +1087,7 @@ def _effort(
         work_item=WorkItem(
             work_item_id=work_item_id or uuid4(),
             repository_ref_id=uuid4(),
-            finding_ids=(uuid4(),),
+            finding_ids=finding_ids or (uuid4(),),
             status=status,
             opened_at=at,
         ),
@@ -1003,6 +1103,54 @@ def _adapter(scheduling: FakeScheduling) -> cli._CoreRemediations:
     """The CLI adapter over the fake service, as `_loop` builds it over core's."""
     core: Any = SimpleNamespace(services=lambda: SimpleNamespace(remediation_scheduling=scheduling))
     return cli._CoreRemediations(core)
+
+
+def test_states_of_counts_prior_attempts_of_the_same_findings() -> None:
+    """The reattempt count is read off the repository's own listing: an over effort that
+    shares a finding with this one is a prior attempt of it (core retries an over attempt
+    as a new work item over the same findings), an over effort of other findings is not,
+    and an effort that is not over never counts."""
+    repository = uuid4()
+    shared = (uuid4(),)
+    other = (uuid4(),)
+    vulnerable = _effort(
+        T0,
+        repository,
+        RemediationStatus.REVALIDATED_STILL_VULNERABLE,
+        work_item_id=uuid4(),
+        finding_ids=shared,
+    )
+    prior = _effort(
+        T0 - timedelta(hours=1),
+        repository,
+        RemediationStatus.REVALIDATED_STILL_VULNERABLE,
+        work_item_id=uuid4(),
+        finding_ids=shared,
+    )
+    unrelated = _effort(
+        T0 - timedelta(hours=2),
+        repository,
+        RemediationStatus.ABANDONED,
+        work_item_id=uuid4(),
+        finding_ids=other,
+    )
+    open_effort = _effort(
+        T0 - timedelta(hours=3),
+        repository,
+        RemediationStatus.CANDIDATE,
+        work_item_id=uuid4(),
+        finding_ids=shared,
+    )
+    states = _adapter(FakeScheduling([vulnerable, prior, unrelated, open_effort])).states_of(
+        repository
+    )
+    by_handle = {s.remediation_id: s for s in states}
+    assert by_handle[vulnerable.work_item.work_item_id].reattempts == 1
+    assert by_handle[prior.work_item.work_item_id].reattempts == 1
+    assert by_handle[unrelated.work_item.work_item_id].reattempts == 0
+    # The candidate over the same findings is the lineage's next attempt: it carries
+    # both over ones as its priors — the count a still-vulnerable reattempt gates on.
+    assert by_handle[open_effort.work_item.work_item_id].reattempts == 2
 
 
 def test_the_adapter_maps_an_effort_onto_the_protocols_state() -> None:

@@ -28,6 +28,7 @@ from traust_core.v1.errors import ConfigError, NotFoundError, PreflightError, Tr
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
+from traust_core.v1.models.remediation import OVER as ATTEMPT_OVER
 from traust_core.v1.models.remediation_scheduling import ScheduledEffort
 from traust_core.v1.models.vocabulary import ActorKind
 
@@ -71,15 +72,26 @@ def _router(spec: str) -> Any:
     module, _, name = spec.partition(":")
     try:
         return getattr(importlib.import_module(module), name)()
-    except (ImportError, AttributeError, ValueError) as e:
+    except (ImportError, AttributeError) as e:
+        # The message names the module or attribute — identifiers, not file content.
         raise ConfigError(f"router {spec}: {e}") from e
+    except ValueError as e:
+        # A router constructor's message can echo anything it was handed; the line
+        # keeps the type alone.
+        raise ConfigError(f"router {spec}: {type(e).__name__}") from e
 
 
 class _CoreRemediations:
     """Core's remediation scheduling service as the engine's `Remediations` protocol: the
-    scheduled efforts read back as the state reports the trigger dispatches on. `reattempts`
-    stays at its default until core exposes the order count the protocol says it derives
-    there; until then a revalidated-still-vulnerable effort reads as untried."""
+    scheduled efforts read back as the state reports the trigger dispatches on.
+
+    `reattempts` counts the effort's prior attempts the way core models them: an attempt
+    that is over is retried as a NEW work item over the same findings, so the count is the
+    repository's other over efforts that share a finding with this one. It is exact on the
+    repository listing (`states_of`, the recheck path); the keyed get (`state_of`, the feed
+    path) holds no siblings, so an effort read there reads as untried — the feed path
+    dispatches candidates, and a still-vulnerable effort it does see gets its count on the
+    recheck the dispatch's own wake schedules."""
 
     def __init__(self, core: Context) -> None:
         self._scheduling = core.services().remediation_scheduling
@@ -98,20 +110,38 @@ class _CoreRemediations:
     def states_of(self, repository_id: UUID) -> list[RemediationState]:
         """Every scheduled effort of the repository, whatever its status: the service's
         repository filter names them, each with its repository read off the effort — no
-        ref resolution and no per-effort detail read."""
-        return [self._state(effort) for effort in self._efforts(repository_id=repository_id)]
+        ref resolution and no per-effort detail read — and with its reattempt count read
+        off the siblings the same listing holds."""
+        efforts = list(self._efforts(repository_id=repository_id))
+        return [self._state(effort, efforts) for effort in efforts]
 
     def _efforts(self, *, repository_id: UUID | None = None) -> Iterator[ScheduledEffort]:
         """Every scheduled effort at the filter, every page followed."""
         return every_item(lambda page: self._scheduling.list(page, repository_id=repository_id))
 
-    def _state(self, effort: ScheduledEffort) -> RemediationState:
+    def _state(
+        self, effort: ScheduledEffort, siblings: list[ScheduledEffort] | None = None
+    ) -> RemediationState:
         """One effort as the trigger's state report: the handle is the work item (the
-        assessment), the status the effort's effective one — the fold core reads."""
+        assessment), the status the effort's effective one — the fold core reads. With
+        the repository's other efforts in hand, `reattempts` is the count of the over
+        ones that share a finding: core retries an over attempt as a new work item over
+        the same findings, so those are this effort's earlier attempts."""
+        reattempts = 0
+        if siblings is not None:
+            findings = set(effort.work_item.finding_ids)
+            reattempts = sum(
+                1
+                for other in siblings
+                if other.work_item.work_item_id != effort.work_item.work_item_id
+                and other.status in ATTEMPT_OVER
+                and findings.intersection(other.work_item.finding_ids)
+            )
         return RemediationState(
             remediation_id=effort.work_item.work_item_id,
             repository_id=effort.repository_id,
             status=effort.status,
+            reattempts=reattempts,
         )
 
 

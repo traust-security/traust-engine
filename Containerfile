@@ -35,12 +35,20 @@ RUN uv pip install --no-deps /app/dist/*.whl
 # The engine's preflight requires gitleaks; the distroless runtime has no shell or
 # package manager, so the binary ships in the image. It is a build input fetched to
 # the repo root before building — never committed (.gitignore'd; the build context
-# includes it through .containerignore's !gitleaks): the upstream v8.21.2
-# linux-amd64 release artifact. The builder has a shell, so the digest is verified
-# here and the runtime copy below refuses to ship anything else.
+# includes it through .containerignore's !gitleaks): the upstream v8.21.2 release
+# artifact for the build's target architecture (`make gitleaks` fetches and verifies
+# the build machine's; a multi-arch build fetches per arch in its build step). The
+# builder has a shell, so the digest is verified here against the TARGETARCH pin and
+# the runtime copy below refuses to ship anything else.
+ARG TARGETARCH=amd64
 COPY gitleaks /tmp/gitleaks
-RUN echo "50b742abd7daad8bbddb6301f3017efb680632d9a5b3b4d8f137b3aac250e359  /tmp/gitleaks" \
-      | sha256sum -c - && chmod 0555 /tmp/gitleaks
+RUN case "$TARGETARCH" in \
+      amd64) echo "50b742abd7daad8bbddb6301f3017efb680632d9a5b3b4d8f137b3aac250e359" ;; \
+      arm64) echo "b337056f2c68bef812b378f2841225f1e52f87a293fe0c457507634defdc6fb8" ;; \
+      *) echo "unsupported gitleaks arch: $TARGETARCH" >&2; exit 1 ;; \
+    esac > /tmp/gitleaks.sha256 \
+    && sed 's|$|  /tmp/gitleaks|' /tmp/gitleaks.sha256 | sha256sum -c - \
+    && chmod 0555 /tmp/gitleaks
 
 # ── Runtime stage ───────────────────────────────────────────────────
 # Minimal hardened Python runtime. Runs as a non-root user (UID 65532) by

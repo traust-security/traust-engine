@@ -80,6 +80,10 @@ class RemediationState(Model):
     remediation_id: UUID
     repository_id: UUID
     status: RemediationStatus
+    #: Prior attempts of the effort's findings, as core models them: an attempt that is
+    #: over is retried as a new work item over the same findings, so the count is the
+    #: repository's over efforts sharing a finding. The adapter computes it on the
+    #: repository listing; the feed-driven keyed read has no siblings and reads zero.
     reattempts: int = 0
 
 
