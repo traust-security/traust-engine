@@ -5,7 +5,7 @@ All notable changes to traust-engine are documented here.
 ## [0.42.0]
 
 - Wire the remediation trigger to core's scheduling service, and move the remediation
-  domain out of the engine (traust-core 44b45fcb, core#400): `traust-engine run` and
+  domain out of the engine (traust-core 31b2f51e, core#400's merge): `traust-engine run` and
   `shadow` pass `RemediationSchedulingService` to the loop directly, so
   remediation-driven dispatch runs instead of staying dormant. The domain the trigger
   reads — the state reports (`RemediationState`), the reattempts derivation, the keyed
