@@ -16,8 +16,8 @@ import sys
 import time
 import traceback
 from collections.abc import Collection, Iterator, Sequence
-from contextlib import ExitStack, contextmanager, suppress
-from datetime import timedelta
+from contextlib import ExitStack, contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -30,7 +30,7 @@ from traust_core.v1.models.identity import Principal
 from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
 from traust_core.v1.models.remediation import OVER as ATTEMPT_OVER
 from traust_core.v1.models.remediation_scheduling import ScheduledEffort
-from traust_core.v1.models.vocabulary import ActorKind
+from traust_core.v1.models.vocabulary import ActorKind, RemediationStatus
 
 from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
@@ -85,64 +85,83 @@ class _CoreRemediations:
     """Core's remediation scheduling service as the engine's `Remediations` protocol: the
     scheduled efforts read back as the state reports the trigger dispatches on.
 
-    `reattempts` counts the effort's prior attempts the way core models them: an attempt
-    that is over is retried as a NEW work item over the same findings, so the count is the
-    repository's other over efforts that share a finding with this one. It is exact on the
-    repository listing (`states_of`, the recheck path); the keyed get (`state_of`, the feed
-    path) holds no siblings, so an effort read there reads as untried — the feed path
-    dispatches candidates, and a still-vulnerable effort it does see gets its count on the
-    recheck the dispatch's own wake schedules."""
+    Core models retries the way the count and the fold both read: an attempt that is over
+    is retried as a NEW work item over the same finding set, so a repository's efforts over
+    one finding set are one lineage. The listing reports each lineage's head — the newest
+    effort — with `reattempts` the lineage's over efforts; an over effort a newer one over
+    its findings supersedes is not reported (a replayed assessment naming one reads as no
+    effort at all, so a restart's full replay dispatches nothing for an attempt that was
+    already retried). An effort still live is reported whatever was opened beside it, and
+    an effort over different findings never counts against another lineage."""
 
     def __init__(self, core: Context) -> None:
         self._scheduling = core.services().remediation_scheduling
 
     def state_of(self, assessment_id: UUID) -> RemediationState | None:
         """The scheduled effort of `assessment_id`, None when the assessment is no effort —
-        no work item, or no order carrying its fork facts (it was not opened through the
-        scheduling door). The service keys its get on the work item, which the assessment
-        is (contracts#117), so the assessment id goes to it directly; the 404 a miss raises
-        is this None. A read that misses softly — None, not a suppressed 404 — is core's
-        to offer."""
-        with suppress(NotFoundError):
-            return self._state(self._scheduling.get(assessment_id))
-        return None
+        no work item, no order carrying its fork facts (it was not opened through the
+        scheduling door), or an effort a newer one over the same findings supersedes (its
+        attempt was already retried). The service keys its get on the work item, which the
+        assessment is (contracts#117), so the assessment id goes to it directly; the 404 a
+        miss raises is this None. A read that misses softly — None, not a suppressed 404 —
+        is core's to offer.
+
+        The keyed read stays page-free except for the one status the reattempt limit gates
+        on: a still-vulnerable effort resolves through its repository's listing, so its
+        lineage's priors and any superseding newer effort are read before the trigger can
+        dispatch it — every other status carries no count the trigger asks for."""
+        try:
+            effort = self._scheduling.get(assessment_id)
+        except NotFoundError:
+            return None
+        if effort.status != RemediationStatus.REVALIDATED_STILL_VULNERABLE:
+            return self._state(effort, [effort])
+        states = self.states_of(effort.repository_id)
+        return next((s for s in states if s.remediation_id == effort.work_item.work_item_id), None)
 
     def states_of(self, repository_id: UUID) -> list[RemediationState]:
-        """Every scheduled effort of the repository, whatever its status: the service's
-        repository filter names them, each with its repository read off the effort — no
-        ref resolution and no per-effort detail read — and with its reattempt count read
-        off the siblings the same listing holds."""
-        efforts = list(self._efforts(repository_id=repository_id))
-        return [self._state(effort, efforts) for effort in efforts]
+        """The repository's scheduled efforts, one per lineage: the service's repository
+        filter names them, each with its repository read off the effort — no ref
+        resolution and no per-effort detail read — folded to each lineage's head (the
+        newest effort over its findings) with the lineage's over efforts as the head's
+        reattempt count, in one pass over the group each finding set names."""
+        lineages: dict[frozenset[UUID], list[ScheduledEffort]] = {}
+        for effort in self._efforts(repository_id=repository_id):
+            lineages.setdefault(frozenset(effort.work_item.finding_ids), []).append(effort)
+        states = []
+        for efforts in lineages.values():
+            head = max(efforts, key=_effort_order)
+            states.append(self._state(head, efforts))
+        return states
 
     def _efforts(self, *, repository_id: UUID | None = None) -> Iterator[ScheduledEffort]:
         """Every scheduled effort at the filter, every page followed."""
         return every_item(lambda page: self._scheduling.list(page, repository_id=repository_id))
 
-    def _state(
-        self, effort: ScheduledEffort, siblings: list[ScheduledEffort] | None = None
-    ) -> RemediationState:
-        """One effort as the trigger's state report: the handle is the work item (the
-        assessment), the status the effort's effective one — the fold core reads. With
-        the repository's other efforts in hand, `reattempts` is the count of the over
-        ones that share a finding: core retries an over attempt as a new work item over
-        the same findings, so those are this effort's earlier attempts."""
-        reattempts = 0
-        if siblings is not None:
-            findings = set(effort.work_item.finding_ids)
-            reattempts = sum(
-                1
-                for other in siblings
-                if other.work_item.work_item_id != effort.work_item.work_item_id
-                and other.status in ATTEMPT_OVER
-                and findings.intersection(other.work_item.finding_ids)
-            )
+    def _state(self, effort: ScheduledEffort, lineage: list[ScheduledEffort]) -> RemediationState:
+        """One lineage head as the trigger's state report: the handle is the work item
+        (the assessment), the status the effort's effective one — the fold core reads —
+        and `reattempts` the lineage's over efforts: core retries an over attempt as a
+        new work item over the same findings, so those are the head's priors."""
+        reattempts = sum(
+            1
+            for other in lineage
+            if other.work_item.work_item_id != effort.work_item.work_item_id
+            and other.status in ATTEMPT_OVER
+        )
         return RemediationState(
             remediation_id=effort.work_item.work_item_id,
             repository_id=effort.repository_id,
             status=effort.status,
             reattempts=reattempts,
         )
+
+
+def _effort_order(effort: ScheduledEffort) -> tuple[datetime, UUID]:
+    """The order a lineage's efforts age in: opening time, then the work item's id as
+    the tie-break. The lineage's head — the effort the trigger reports — is the newest;
+    the older ones are its history, live or over."""
+    return (effort.work_item.opened_at, effort.work_item.work_item_id)
 
 
 @contextmanager

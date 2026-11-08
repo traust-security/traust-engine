@@ -1105,52 +1105,88 @@ def _adapter(scheduling: FakeScheduling) -> cli._CoreRemediations:
     return cli._CoreRemediations(core)
 
 
-def test_states_of_counts_prior_attempts_of_the_same_findings() -> None:
-    """The reattempt count is read off the repository's own listing: an over effort that
-    shares a finding with this one is a prior attempt of it (core retries an over attempt
-    as a new work item over the same findings), an over effort of other findings is not,
-    and an effort that is not over never counts."""
+def test_states_of_folds_a_lineage_to_its_head_with_its_priors() -> None:
+    """The repository's listing reports one effort per lineage — the newest over the
+    finding set — with the lineage's over efforts as its reattempt count (core retries an
+    over attempt as a new work item over the same findings). An effort still live is
+    reported whatever was opened beside it, and an effort over other findings — however
+    they overlap — never counts against another lineage."""
     repository = uuid4()
-    shared = (uuid4(),)
-    other = (uuid4(),)
-    vulnerable = _effort(
+    first, second, third = uuid4(), uuid4(), uuid4()
+    head = _effort(
         T0,
         repository,
         RemediationStatus.REVALIDATED_STILL_VULNERABLE,
         work_item_id=uuid4(),
-        finding_ids=shared,
+        finding_ids=(first, second),
     )
     prior = _effort(
+        T0 - timedelta(hours=1),
+        repository,
+        RemediationStatus.ABANDONED,
+        work_item_id=uuid4(),
+        finding_ids=(first, second),
+    )
+    # Over efforts over overlapping-but-different finding sets: another lineage's
+    # attempts, never this head's count.
+    overlap = _effort(
+        T0 - timedelta(hours=2),
+        repository,
+        RemediationStatus.ABANDONED,
+        work_item_id=uuid4(),
+        finding_ids=(second,),
+    )
+    separate = _effort(
+        T0 - timedelta(hours=3),
+        repository,
+        RemediationStatus.ABANDONED,
+        work_item_id=uuid4(),
+        finding_ids=(third,),
+    )
+    # A live effort the door opened while the lineage's attempts ran: still reported.
+    live = _effort(
+        T0 - timedelta(minutes=30),
+        repository,
+        RemediationStatus.CANDIDATE,
+        work_item_id=uuid4(),
+        finding_ids=(first,),
+    )
+    states = _adapter(FakeScheduling([head, prior, overlap, separate, live])).states_of(repository)
+    by_handle = {s.remediation_id: s for s in states}
+    assert head.work_item.work_item_id in by_handle
+    assert prior.work_item.work_item_id not in by_handle  # the lineage's over prior
+    assert overlap.work_item.work_item_id in by_handle  # over, but no newer same-set effort
+    assert separate.work_item.work_item_id in by_handle
+    assert live.work_item.work_item_id in by_handle  # live work is never displaced
+    assert by_handle[head.work_item.work_item_id].reattempts == 1
+    assert by_handle[overlap.work_item.work_item_id].reattempts == 0
+
+
+def test_a_replayed_assessment_of_a_superseded_effort_reads_as_no_effort() -> None:
+    """A restart's full feed replay re-reads an assessment whose attempt was already
+    retried — a newer work item over the same findings exists. The keyed read resolves
+    through the lineage and answers None, so the replay dispatches nothing for the old
+    attempt and cannot bypass the lineage's reattempt limit."""
+    repository = uuid4()
+    shared = (uuid4(),)
+    retry = _effort(
+        T0,
+        repository,
+        RemediationStatus.CANDIDATE,
+        work_item_id=uuid4(),
+        finding_ids=shared,
+    )
+    superseded = _effort(
         T0 - timedelta(hours=1),
         repository,
         RemediationStatus.REVALIDATED_STILL_VULNERABLE,
         work_item_id=uuid4(),
         finding_ids=shared,
     )
-    unrelated = _effort(
-        T0 - timedelta(hours=2),
-        repository,
-        RemediationStatus.ABANDONED,
-        work_item_id=uuid4(),
-        finding_ids=other,
-    )
-    open_effort = _effort(
-        T0 - timedelta(hours=3),
-        repository,
-        RemediationStatus.CANDIDATE,
-        work_item_id=uuid4(),
-        finding_ids=shared,
-    )
-    states = _adapter(FakeScheduling([vulnerable, prior, unrelated, open_effort])).states_of(
-        repository
-    )
-    by_handle = {s.remediation_id: s for s in states}
-    assert by_handle[vulnerable.work_item.work_item_id].reattempts == 1
-    assert by_handle[prior.work_item.work_item_id].reattempts == 1
-    assert by_handle[unrelated.work_item.work_item_id].reattempts == 0
-    # The candidate over the same findings is the lineage's next attempt: it carries
-    # both over ones as its priors — the count a still-vulnerable reattempt gates on.
-    assert by_handle[open_effort.work_item.work_item_id].reattempts == 2
+    adapter = _adapter(FakeScheduling([retry, superseded]))
+    assert adapter.state_of(superseded.work_item.work_item_id) is None
+    state = adapter.state_of(retry.work_item.work_item_id)
+    assert state is not None and state.status == RemediationStatus.CANDIDATE
 
 
 def test_the_adapter_maps_an_effort_onto_the_protocols_state() -> None:

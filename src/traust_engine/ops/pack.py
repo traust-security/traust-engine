@@ -34,7 +34,17 @@ Duration = Annotated[timedelta, pydantic.BeforeValidator(_duration)]
 
 
 def _cron(value: object) -> object:
-    return Cron.parse(value) if isinstance(value, str) else value
+    if not isinstance(value, str):
+        return value
+    try:
+        return Cron.parse(value)
+    except ValueError as e:
+        # The parser's message echoes the expression — a pack value — and a pack
+        # value is exactly what the startup line must not carry; this wording
+        # is bounded: the verdict, never the expression itself.
+        raise ValueError(
+            "not a cron expression (five fields: minute hour day month weekday)"
+        ) from e
 
 
 class Trigger(Dto):
