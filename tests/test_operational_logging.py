@@ -322,7 +322,8 @@ def test_shadow_once_includes_tick_diagnostics_in_its_terminal_summary(
     assert len(ticks) == 1 and ticks[0]["outcome"] == "completed"
     assert ticks[0]["level"] == "WARNING"
     assert ticks[0]["status"] == (
-        "shadow,due:1,planned:1,routed:2,unrouted:3,refused:4,stale:5,overdue:6,unrunnable:1,"
+        "shadow,due:1,remediation:0,planned:1,routed:2,unrouted:3,refused:4,stale:5,"
+        "overdue:6,unrunnable:1,"
         "stale_assets:dependent,overdue_assets:scheduled,unrunnable_assets:disabled"
     )
 
