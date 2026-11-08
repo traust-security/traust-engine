@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Collection
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
 
@@ -24,24 +24,23 @@ from traust_core.v1.models.inventory import (
 )
 from traust_core.v1.models.operations import (
     OPEN_ORDER_STATES,
+    REMEDIATE_FINDING,
+    REMEDIATE_RULE_PREFIX,
+    VERIFY_RULE_PREFIX,
     AssetName,
     LaneName,
     OrderReason,
     OrderRequest,
     OrderState,
     Refusal,
+    RunOrder,
+    is_remediation_rule,
 )
+from traust_core.v1.models.remediation_scheduling import RemediationState
 from traust_core.v1.models.vocabulary import ActorKind, AssessmentKind, RemediationStatus
+from traust_core.v1.services.remediation_scheduling import RemediationSchedulingService
 
 from traust_engine.ops.pack import Pack
-from traust_engine.ops.remediation import (
-    REATTEMPT_LIMIT,
-    REMEDIATE_ASSET,
-    RETRY_AFTER,
-    VERIFY_ASSET,
-    Remediations,
-    RemediationState,
-)
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +51,41 @@ MATERIALIZED = (OrderState.SUCCEEDED, OrderState.DEGRADED)
 # A refused or failed run waits out the cadence too, so a broken asset can't spin every tick.
 ATTEMPTED = (*MATERIALIZED, OrderState.REFUSED, OrderState.FAILED)
 FEED_PAGE = 1000
+
+#: The pack asset the trigger queues verification on: the verification sweep the security
+#: pack already runs weekly, queued on demand when a remediation is implemented. The
+#: attempt itself — core's `REMEDIATE_FINDING` — is the skill session that patches (the
+#: security pack does not run it; SCI's local pack defines it).
+VERIFY_ASSET = AssetName("verify_remediation")
+
+#: How many times a remediation that verification still finds vulnerable is re-attempted
+#: before it waits for a person (REMEDIATION-SCHEDULING-DESIGN.md, "Verification trigger").
+#: The count it gates on is core's to report: `RemediationState.reattempts`.
+REATTEMPT_LIMIT = 2
+
+#: How long an attempted order (finished, degraded, failed or refused) suppresses
+#: re-dispatching the same remediation, the cadence path's "a refused or failed run
+#: waits out the cadence" rule carried over to event-driven work: a sweep that fails
+#: without a verdict, or a run that finishes without recording, is retried at most
+#: this often — by the next pass after the window, not by every restart or recheck.
+#: The bound is per remediation (its rule), not per repository: an unrelated
+#: remediation of the same repository is serialized by the open-order check alone.
+RETRY_AFTER = timedelta(hours=1)
+
+
+def is_remediation_run(order: RunOrder) -> bool:
+    """Whether a finished order is remediation work rather than cadence work: the
+    trigger's own orders carry its rules (core's vocabulary), and the scheduling door's
+    orders name a work item. The shadow comparison measures cadence work only. Every
+    work-item order today is remediation work — the door opens work items for remediations
+    alone — so the classification is exact; if core grows non-remediation work
+    items, this must discriminate before the shadow diff silently shrinks. The
+    work-item column is read defensively because this pin predates it (core#377
+    added it): on the pinned core no order names one and the rule alone decides,
+    and on a pin that carries the column the attribute should be read directly,
+    so drift fails loudly instead of classifying as cadence work."""
+    work_item = getattr(order, "work_item_id", None)
+    return is_remediation_rule(order.rule) or work_item is not None
 
 
 class TickReport(Model):
@@ -90,7 +124,7 @@ class Controller(Generic[S]):
         state_of: Callable[[UUID], S] | None = None,
         feed: FeedQuery | None = None,
         portfolio: Releases | None = None,
-        remediations: Remediations | None = None,
+        remediations: RemediationSchedulingService | None = None,
     ) -> None:
         if (router is None) != (state_of is None) or (
             router is not None and (feed is None or portfolio is None)
@@ -356,7 +390,7 @@ class Controller(Generic[S]):
                             recheck[repository_id] = None
                 elif (
                     (order := event.order) is not None
-                    and order.asset in (REMEDIATE_ASSET, VERIFY_ASSET)
+                    and order.asset in (REMEDIATE_FINDING, VERIFY_ASSET)
                     and order.state in ATTEMPTED
                 ):
                     # A finished attempt — materialized, refused or failed — re-reads what
@@ -418,9 +452,9 @@ class Controller(Generic[S]):
             # engine's to plan: no state keys its retry window or reattempts, and no
             # order would carry the fork facts a run needs to do the work.
             self._request(
-                REMEDIATE_ASSET,
+                REMEDIATE_FINDING,
                 state.repository_id,
-                f"remediation:{state.remediation_id}",
+                f"{REMEDIATE_RULE_PREFIX}{state.work_item_id}",
                 requests,
                 planned,
                 busy,
@@ -470,9 +504,9 @@ class Controller(Generic[S]):
         other attempt."""
         if state.status == RemediationStatus.CANDIDATE:
             self._request(
-                REMEDIATE_ASSET,
+                REMEDIATE_FINDING,
                 state.repository_id,
-                f"remediation:{state.remediation_id}",
+                f"{REMEDIATE_RULE_PREFIX}{state.work_item_id}",
                 requests,
                 planned,
                 busy,
@@ -483,7 +517,7 @@ class Controller(Generic[S]):
             self._request(
                 VERIFY_ASSET,
                 state.repository_id,
-                f"verify-remediation:{state.remediation_id}",
+                f"{VERIFY_RULE_PREFIX}{state.work_item_id}",
                 requests,
                 planned,
                 busy,
@@ -495,9 +529,9 @@ class Controller(Generic[S]):
             and state.reattempts < REATTEMPT_LIMIT
         ):
             self._request(
-                REMEDIATE_ASSET,
+                REMEDIATE_FINDING,
                 state.repository_id,
-                f"remediation:{state.remediation_id}",
+                f"{REMEDIATE_RULE_PREFIX}{state.work_item_id}",
                 requests,
                 planned,
                 busy,

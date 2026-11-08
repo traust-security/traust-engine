@@ -21,7 +21,7 @@ traust-engine = "traust_engine.ops.cli:main"
 dev = ["pytest>=9.1.1", "pytest-xdist>=3", "ruff>=0.6", "vulture>=2.16"]
 
 [tool.uv.sources]
-traust-core = { git = "https://github.com/traust-security/traust-core.git", rev = "d7564cd5a28dbd3ceca86bf80e04687d3ec675a8" }
+traust-core = { git = "https://github.com/traust-security/traust-core.git", rev = "54da6e993b15a6eef847cbdc560637ec253a8f28" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/traust_engine"]

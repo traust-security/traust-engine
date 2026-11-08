@@ -4,13 +4,16 @@ All notable changes to traust-engine are documented here.
 
 ## [0.42.0]
 
-- Wire the remediation trigger to core's scheduling service: `traust-engine run` and
-  `shadow` build the loop's `Remediations` from `RemediationSchedulingService`
-  (traust-core 6ead8d83, core#391), so remediation-driven dispatch runs instead of
-  staying dormant. The adapter reads a scheduled effort by its work item — the
-  assessment names it (contracts#117), so `state_of` is the service's keyed get — and
-  the repository's efforts through the service's own filter, mapping them onto the
-  trigger's state reports.
+- Wire the remediation trigger to core's scheduling service, and move the remediation
+  domain out of the engine (traust-core 54da6e99, core#400): `traust-engine run` and
+  `shadow` pass `RemediationSchedulingService` to the loop directly, so
+  remediation-driven dispatch runs instead of staying dormant. The domain the trigger
+  reads — the state reports (`RemediationState`), the reattempts derivation, the keyed
+  read's soft None, the `remediation:` / `verify-remediation:` rule vocabulary — is
+  core's; `ops/remediation.py` (the `Remediations` protocol, the state type, the CLI
+  adapter that re-stated them) is deleted. The trigger's planning policy stays in the
+  controller: the status mappings, the reattempt limit and the retry window, consuming
+  core's types.
 - A config failure's error line carries the failure's own message — the file and the
   schema rule that failed — instead of the generic "check --core, --pack and the
   configuration files"; foreign exceptions stay bounded to their type and hint, and the

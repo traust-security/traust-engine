@@ -13,11 +13,11 @@ from traust_core.v1.models.base import Model
 from traust_core.v1.models.common import Cursor, every_item
 from traust_core.v1.models.inventory import RecordedRelease, RepositoryFilter
 from traust_core.v1.models.operations import OrderRequest
+from traust_core.v1.services.remediation_scheduling import RemediationSchedulingService
 
 from traust_engine.ops.admission import Admission, AdmissionReport
 from traust_engine.ops.controller import ENGINE, Controller, TickReport
 from traust_engine.ops.pack import Pack
-from traust_engine.ops.remediation import Remediations
 
 S = TypeVar("S")
 
@@ -47,7 +47,7 @@ class EngineLoop(Generic[S]):
         pack: Pack,
         router: Router[S, RecordedRelease] | None = None,
         state_of: Callable[[UUID], S] | None = None,
-        remediations: Remediations | None = None,
+        remediations: RemediationSchedulingService | None = None,
     ) -> None:
         self._services = services
         self._pack = pack
