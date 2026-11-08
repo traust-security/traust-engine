@@ -38,7 +38,6 @@ from traust_core.v1.models.operations import (
 )
 from traust_core.v1.models.remediation_scheduling import RemediationState
 from traust_core.v1.models.vocabulary import ActorKind, AssessmentKind, RemediationStatus
-from traust_core.v1.services.remediation_scheduling import RemediationSchedulingService
 
 from traust_engine.ops.pack import Pack
 
@@ -114,6 +113,18 @@ class Releases(Protocol):
     inventory: Refs
 
 
+class Scheduling(Protocol):
+    """The scheduled-effort state reads the trigger needs; `Context.services()
+    .remediation_scheduling` satisfies it. The seam is structural by the consumer
+    rule (the ratchet's `core-internal`: the engine reaches core's services through
+    the context, never by importing them) — the domain it reads is core's, every
+    type below included: the state report, the fold, the reattempts derivation."""
+
+    def state_of(self, work_item_id: UUID) -> RemediationState | None: ...
+
+    def states_of(self, repository_id: UUID) -> list[RemediationState]: ...
+
+
 class Controller(Generic[S]):
     def __init__(
         self,
@@ -124,7 +135,7 @@ class Controller(Generic[S]):
         state_of: Callable[[UUID], S] | None = None,
         feed: FeedQuery | None = None,
         portfolio: Releases | None = None,
-        remediations: RemediationSchedulingService | None = None,
+        remediations: Scheduling | None = None,
     ) -> None:
         if (router is None) != (state_of is None) or (
             router is not None and (feed is None or portfolio is None)

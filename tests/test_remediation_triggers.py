@@ -3,7 +3,8 @@ become remediation and verification orders, read through core's scheduling servi
 (REMEDIATION-SCHEDULING-DESIGN.md, "Engine trigger" and "Verification trigger"). The
 domain is core's — the state reports (`RemediationState`), the reattempts derivation and
 the keyed miss's soft None all live in `RemediationSchedulingService`, which the loop is
-wired to directly; the fake below stands in for its two state-report reads so the
+wired to through `Context.services()` (the ratchet's consumer rule: the engine never
+imports core's services); the fake below stands in for its two state-report reads so the
 trigger's tests drive planning over fixture states, not the fold (core's own service
 tests cover the read)."""
 
@@ -32,7 +33,6 @@ from traust_core.v1.models.operations import (
 from traust_core.v1.models.remediation_scheduling import RemediationState
 from traust_core.v1.models.values import GitSha, HttpsRepoUrl
 from traust_core.v1.models.vocabulary import AssessmentKind, RemediationStatus
-from traust_core.v1.services.remediation_scheduling import RemediationSchedulingService
 
 from traust_engine.ops.controller import ENGINE, RETRY_AFTER, Controller
 from traust_engine.ops.loop import EngineLoop
@@ -71,12 +71,12 @@ class FakeFeed:
         )
 
 
-class FakeScheduling(RemediationSchedulingService):
+class FakeScheduling:
     """Core's scheduling service with the state-report reads answered from memory: the
     trigger's tests drive planning over fixture states keyed by the work item (the
-    assessment the feed's events name) and by repository — exactly the two reads the
-    controller asks for. Nothing else is called, so no collaborators are wired and the
-    fold stays core's own to test."""
+    assessment the feed's events name) and by repository — exactly the seam the
+    controller asks for. The fold behind the reads is core's own to test; here the
+    states are the fixtures."""
 
     def __init__(self, *states: RemediationState) -> None:
         self.by_work_item = {s.work_item_id: s for s in states}
