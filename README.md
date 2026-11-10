@@ -52,6 +52,14 @@ replace removed engine imports with core provider/repository internals. See
 [traust-core](https://github.com/traust-security/traust-core) for its service API and
 [traust](https://github.com/traust-security/traust) for CLI and pack configuration.
 
+Typed adapter `scan()` results are scanner observations validated against
+`adapter-result.schema.json`, not authored audit findings. Unreported CWEs,
+description and remediation stay empty; adapters do not supply validity
+verdicts. Scanner identity lives in `metadata.tool`; native fingerprints remain
+in raw scanner candidates, not the domain finding fingerprint. Supplied
+Finding metadata and declared workflow origins are preserved, and an explicit
+unknown severity raises rather than becoming `low`.
+
 ## Install
 
 Private Git (after tags are published):

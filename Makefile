@@ -1,8 +1,6 @@
 PYTHON ?= python3
-RELEASE := ./release.py
-BUMP_PARTS := patch minor major
 
-.PHONY: help setup sync hooks lint lint-fix test check-release status bump gitleaks $(BUMP_PARTS)
+.PHONY: help setup sync hooks lint lint-fix test gitleaks
 
 help:
 	@echo "Targets ($(notdir $(CURDIR))):"
@@ -12,9 +10,6 @@ help:
 	@echo "  make lint           — ruff check + format --check"
 	@echo "  make lint-fix       - ruff --fix"
 	@echo "  make test           — pytest unit tests, excludes integration (parallel via pytest-xdist)"
-	@echo "  make check-release  — VERSION + CHANGELOG gate for current branch vs main"
-	@echo "  make status         — current version, tag, git state"
-	@echo "  make bump patch|minor|major — bump VERSION + pyproject.toml"
 	@echo "  make gitleaks        — fetch the pinned gitleaks binary for this arch (image build input)"
 
 setup: sync hooks
@@ -37,25 +32,6 @@ lint-fix:
 
 test:
 	uv run pytest tests/ -q -n auto -m "not integration"
-
-check-release:
-	@base="$${RELEASE_BASE:-origin/main}"; \
-	head="$${RELEASE_HEAD:-HEAD}"; \
-	$(PYTHON) ci/gates.py mr "$$base" "$$head"
-
-$(BUMP_PARTS):
-	@:
-
-status:
-	$(PYTHON) $(RELEASE) status
-
-bump:
-	@part="$(filter $(BUMP_PARTS),$(MAKECMDGOALS))"; \
-	if [ -z "$$part" ]; then \
-		echo "usage: make bump patch|minor|major" >&2; \
-		exit 1; \
-	fi; \
-	$(PYTHON) $(RELEASE) bump $$part
 
 # The container build's gitleaks input (Containerfile COPY gitleaks): the upstream
 # v8.30.1 release artifact for the BUILD MACHINE's architecture, digest-verified —

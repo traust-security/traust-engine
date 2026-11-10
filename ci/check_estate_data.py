@@ -66,7 +66,7 @@ THRESHOLD_RE = re.compile(r"\b[A-Z]\s*(?:>=|<=|[><≥≤])\s*\d{1,3}(?:,\d{3})+"
 MONEY_RE = re.compile(r"[$£€]\s?\d{1,3}(?:,\d{3})+(?:\.\d+)?|[$£€]\s?\d+\.\d{2}\b")
 
 WAIVER_RE = re.compile(r"estate-data-ok:\s*\S")
-ALLOWED = {"CHANGELOG.md"}
+ALLOWED: set[str] = set()
 SKIP_SUFFIXES = (".lock", ".svg", ".png", ".jpg", ".gz", ".db", ".ipynb")
 
 
