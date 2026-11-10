@@ -2,7 +2,7 @@ PYTHON ?= python3
 RELEASE := ./release.py
 BUMP_PARTS := patch minor major
 
-.PHONY: help setup sync hooks lint lint-fix test check-release status bump gitleaks $(BUMP_PARTS)
+.PHONY: help setup sync hooks lint lint-fix test perf check-release status bump gitleaks $(BUMP_PARTS)
 
 help:
 	@echo "Targets ($(notdir $(CURDIR))):"
@@ -12,6 +12,7 @@ help:
 	@echo "  make lint           — ruff check + format --check"
 	@echo "  make lint-fix       - ruff --fix"
 	@echo "  make test           — pytest unit tests, excludes integration (parallel via pytest-xdist)"
+	@echo "  make perf           — the planning pass at fleet volume on Postgres (db-up in traust-core)"
 	@echo "  make check-release  — VERSION + CHANGELOG gate for current branch vs main"
 	@echo "  make status         — current version, tag, git state"
 	@echo "  make bump patch|minor|major — bump VERSION + pyproject.toml"
@@ -37,6 +38,9 @@ lint-fix:
 
 test:
 	uv run pytest tests/ -q -n auto -m "not integration"
+
+perf:
+	uv run pytest perf/ -q
 
 check-release:
 	@base="$${RELEASE_BASE:-origin/main}"; \
