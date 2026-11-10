@@ -51,10 +51,12 @@ MATERIALIZED = (OrderState.SUCCEEDED, OrderState.DEGRADED)
 ATTEMPTED = (*MATERIALIZED, OrderState.REFUSED, OrderState.FAILED)
 FEED_PAGE = 1000
 
-#: The pack asset the trigger queues verification on: the verification sweep the security
-#: pack already runs weekly, queued on demand when a remediation is implemented. The
-#: attempt itself — core's `REMEDIATE_FINDING` — is the skill session that patches (the
-#: security pack does not run it; SCI's local pack defines it).
+#: The pack assets the trigger dispatches: both lanes of the remediation scheduling flow,
+#: repository-bound worker-entrypoint sessions the security pack declares at the embedded
+#: sci-pack's shapes (karen's audit M1 landed them there — a pack whose verify lane is a
+#: fleet-wide sweep plans repository-less orders no claimant runs, and one without the
+#: remediate lane skips the dispatch outright). The attempt itself is core's
+#: `REMEDIATE_FINDING`; verification queues on demand when a remediation is implemented.
 VERIFY_ASSET = AssetName("verify_remediation")
 
 #: How many times a remediation that verification still finds vulnerable is re-attempted
@@ -466,6 +468,7 @@ class Controller(Generic[S]):
                 REMEDIATE_FINDING,
                 state.repository_id,
                 f"{REMEDIATE_RULE_PREFIX}{state.work_item_id}",
+                state.work_item_id,
                 requests,
                 planned,
                 busy,
@@ -518,6 +521,7 @@ class Controller(Generic[S]):
                 REMEDIATE_FINDING,
                 state.repository_id,
                 f"{REMEDIATE_RULE_PREFIX}{state.work_item_id}",
+                state.work_item_id,
                 requests,
                 planned,
                 busy,
@@ -529,6 +533,7 @@ class Controller(Generic[S]):
                 VERIFY_ASSET,
                 state.repository_id,
                 f"{VERIFY_RULE_PREFIX}{state.work_item_id}",
+                state.work_item_id,
                 requests,
                 planned,
                 busy,
@@ -543,6 +548,7 @@ class Controller(Generic[S]):
                 REMEDIATE_FINDING,
                 state.repository_id,
                 f"{REMEDIATE_RULE_PREFIX}{state.work_item_id}",
+                state.work_item_id,
                 requests,
                 planned,
                 busy,
@@ -555,6 +561,7 @@ class Controller(Generic[S]):
         asset: AssetName,
         repository_id: UUID | None,
         rule: str,
+        work_item_id: UUID,
         requests: list[OrderRequest],
         planned: set[tuple[AssetName, UUID | None]],
         busy: dict[AssetName, tuple[set[UUID | None], dict[str, datetime]]],
@@ -564,7 +571,11 @@ class Controller(Generic[S]):
         """Plan one order of `asset` for the repository, unless the pack runs no such
         asset, one is already open for the subject, an attempt of this very remediation
         the retry window has not outlived holds it, or this pass already planned it.
-        Demand an attempt holds is deferred with a wake-up, not dropped: the first pass
+        The order names its work item in the `work_item_id` column — the machine
+        binding core's doors, the SDK's preparation and SCI's cadence read (an order
+        whose work item lives only in its rule is refused at the recording start:
+        the rule stays as the human-readable key, the column is the binding). Demand
+        an attempt holds is deferred with a wake-up, not dropped: the first pass
         after the window dispatches it (a restart loses the memory, but its full replay
         re-derives it). A preview (`wake=False`) reads the same window but writes no
         deferral — the shadow consumes nothing. Returns whether the repository's demand
@@ -644,7 +655,13 @@ class Controller(Generic[S]):
         if repository_id is not None:
             demanded.add(repository_id)
         requests.append(
-            OrderRequest(asset=asset, priority=spec.priority, repository_id=subject, rule=rule)
+            OrderRequest(
+                asset=asset,
+                priority=spec.priority,
+                repository_id=subject,
+                rule=rule,
+                work_item_id=work_item_id,
+            )
         )
         return True
 
