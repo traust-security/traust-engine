@@ -4,43 +4,24 @@ build-backend = "hatchling.build"
 
 [project]
 name = "traust-engine"
-version = "0.47.0"
+version = "0.1.0"
 license = "Apache-2.0"
-description = "Processing core for the AI security harness: scanners, data management, analysis, format handlers"
+description = "Continuous-ops service for the AI security harness, on traust-core"
 requires-python = ">=3.11"
 dependencies = [
-    "traust-contracts",
-    "traust-ledger",
-    "jsonschema>=4.0",
-    "referencing",
+    "traust-core[postgres]",
+    "pydantic",
     "pyyaml",
 ]
 
-[project.optional-dependencies]
-postgres = ["psycopg[binary]>=3"]
-ledger-migration = ["traust-ledger[db]"]
-graph = [
-    "tree-sitter",
-    "tree-sitter-go",
-    "tree-sitter-python",
-    "tree-sitter-typescript",
-    "tree-sitter-javascript",
-]
-signing = ["sigstore>=4.0,<5.0"]
-# Object-store locations for ANALYSIS_RESULTS_URI / PORTFOLIO_GRAPH_URI.
-# Optional on purpose: a local path or file:// imports none of this, so an
-# operator workstation acquires no dependency for a deployment feature.
-# Install the driver for the store you use alongside it (s3fs, gcsfs, adlfs).
-remote = ["fsspec>=2024.2"]
-s3 = ["fsspec>=2024.2", "s3fs>=2024.2"]
-gcs = ["fsspec>=2024.2", "gcsfs>=2024.2"]
+[project.scripts]
+traust-engine = "traust_engine.ops.cli:main"
 
 [dependency-groups]
-dev = ["fsspec>=2024.2", "pytest>=9.1.1", "ruff>=0.6", "vulture>=2.16"]
+dev = ["pytest>=9.1.1", "pytest-xdist>=3", "ruff>=0.6", "vulture>=2.16"]
 
 [tool.uv.sources]
-traust-contracts = { git = "https://github.com/traust-security/traust-contracts.git", rev = "25bfd178a4f595996ff2434c3ced0666dce3da96" }
-traust-ledger = { git = "https://github.com/traust-security/traust-ledger.git", rev = "da5fa5abd44de33ce645c4d6d4dd217f5a62bc44" }
+traust-core = { git = "https://github.com/traust-security/traust-core.git", rev = "69d4dd8e9e2a1e437710ac8093ebfb399357b5a9" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/traust_engine"]
@@ -51,16 +32,12 @@ exclude = ["/.ci-venv", "/.venv"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: tests requiring external binaries (gitleaks, opengrep) on PATH",
-    "postgres: e2e tests requiring the shared traust-postgres instance (auto-skip unless TRAUST_MIGRATION_TEST_DATABASE_URL is reachable)",
-    "requires_git: test creates git repos in tmp dirs (skipped when git init is blocked)",
-    "unbound_safe_exec: skip autouse profile bind; assert fallback or explicit profile_map",
+    "integration: tests requiring external binaries (opengrep) on PATH",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["src/traust_engine/data/secure-code-audit"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP", "B", "SIM", "PTH", "RUF"]
@@ -68,6 +45,3 @@ ignore = ["RUF001", "RUF002", "RUF003"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "E741", "E402", "E501", "RUF012"]
-"src/traust_engine/reporting/lint.py" = ["E501"]
-"src/traust_engine/metrics/history.py" = ["E501"]
-"src/traust_engine/reporting/validate.py" = ["E402"]

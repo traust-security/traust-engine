@@ -1,0 +1,61 @@
+# Lint and unit tests on every PR, in the merge queue, and after each merge to development
+# or main. Mirrors the Makefile (`make lint`, `make test`).
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main, development]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: make lint
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --frozen
+      - run: make test
+
+  # Consumer fence: new direct state access fails; .ratchet.json only shrinks (checked against
+  # the base branch's). The ratchet is pinned here, independent of the runtime traust-core pin.
+  ratchet:
+    runs-on: ubuntu-latest
+    env:
+      RATCHET: traust-core @ git+https://github.com/traust-security/traust-core@cb9bf23fb8fe385c89224276c1ee6700d71e6e37
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - run: |
+          BASE="${{ github.base_ref || 'development' }}"
+          git fetch --depth=1 origin "$BASE"
+          REF=""
+          if git show "origin/$BASE:.ratchet.json" > /tmp/ratchet-reference.json 2>/dev/null; then
+            REF="--reference /tmp/ratchet-reference.json"
+          fi
+          uvx --from "$RATCHET" python -m traust_core.v1.checks.ratchet src \
+            --rules consumer --baseline .ratchet.json $REF

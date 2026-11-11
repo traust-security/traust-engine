@@ -1,0 +1,33 @@
+pack: security
+route_on: repo_state
+assets:
+  feeds_cache:
+    run: [python3, -m, traust.cli, feeds, fetch, --feed, all]
+    trigger: {every: 24h}
+    priority: 10
+    runner: {labels: ["egress:public"]}
+
+  repo_state:
+    run: [python3, -m, traust.cli, portfolio, observe, --repo, "{repo_url}"]
+    partitions: dynamic:repo
+    params: {repo_url: HttpsRepoUrl}
+    trigger: {every: 24h}
+    priority: 20
+    admission:
+      quota: {key: "forge:{host}", per_hour: 2}
+    runner: {labels: ["forge:{host}"]}
+
+  dependency_graph:
+    model: {role: dependency-graph}
+    partitions: dynamic:repo
+    deps: [repo_state, feeds_cache]
+    trigger: {every: 7d}
+    priority: 50
+
+  diff_scan:
+    partitions: dynamic:repo
+    deps: [repo_state]
+    trigger: {lanes: [diff-scan, diff-scan-quarterly]}
+    admission: {estimate_usd: "2.00"}
+    run: [/vuln-scan, --diff, --, "{repo_url}"]
+    params: {repo_url: HttpsRepoUrl, sha: GitSha}

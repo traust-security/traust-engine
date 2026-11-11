@@ -1,31 +1,56 @@
 # traust-engine
 
-Self-contained processing library for Traust. Deterministic workflow code
-(disposition merge, validation gates, rule calibration) lives here—not in the
-app CLI. Import as `traust_engine`.
+The continuous-ops service for Traust, on traust-core: `traust_engine.ops` runs a
+pack's assets through traust-core services. Finding identity, disposition,
+persistence, tools and reporting belong to traust-core. Import as `traust_engine`.
 
 ## Architecture
 
 | Module | Role |
 |---|---|
-| `traust_engine.corpus.disposition` | Disposition merge engine |
-| `traust_engine.validation` | Scope enforcement and soundness gates |
-| `traust_engine.sweep.calibration` | Rule-pack calibration library API |
-| `traust_engine.adapters` | Scanner adapters (gitleaks, opengrep, …) |
-| `traust_engine.reporting` | Report validation, SARIF, render |
+| `traust_engine.ops` | Continuous ops: `Pack` (the pack's `assets.yaml`, checked against contracts `config/v1/pack`), the tick, admission and the reaper (`EngineLoop.run_once`), all through traust-core services |
 
-Rule packs ship under `data/secure-code-audit/` (`opengrep-rules/`,
-`gitleaks-rules/`). This library ships **no configuration files and never loads
-config itself — it is a pure consumer.** A caller builds the context once
-(`traust_contracts.load_context()`, done for you by
-`HarnessEngine.load(config_home=…)`) and the engine receives it *injected*: the
-ops namespaces (`h.metrics`, `h.corpus`, …) hold the frozen `HarnessContext` and
-derive paths from it; stateless functions take already-resolved arguments. No
-environment overrides, no cwd or workspace-shaped guessing; a required-but-absent
-file fails closed with `DeploymentConfigMissing` at the entry point. The config
-ownership model (contract / resolution / consumer) is documented in
-`traust/docs/architecture.md` → *Configuration & context*; the runtime paths this
-engine reads from `locations.yaml` are in *Runtime configuration* below.
+This library ships **no configuration files and never loads config itself.**
+The service entry point (`traust-engine run|shadow|record|diff|claim --core <core.yaml>
+--pack <assets.yaml>`) builds traust-core's `Context` once from the files it is given and
+passes core's services in; everything below it takes already-resolved arguments. `--core`
+takes a separate core configuration file in `traust.yaml` format, not the `traust.yaml` in
+an old configuration home. Set its `home:` to the deployment home (otherwise core defaults
+to `~/.traust`); inline `locations:` are resolved relative to `core.yaml` by traust-core.
+The engine imports only traust-core's public API: `traust_core.v1.context`, `models` and
+`errors` (the consumer ratchet in CI holds it there).
+
+Command templates can use `{worker}` alongside `{run_id}`, `{repo_url}`, `{role}` and
+`{rule}`. `{worker}` is the claiming runner's ID, so artifact-only session commands can
+record their audit evidence under the same lease; claim, heartbeat and completion are unchanged.
+
+## Migrating from the processing-library API on main
+
+The continuous-ops engine is **not a drop-in replacement** for the processing library
+on `main`. Its public exports are `EngineLoop` and `Pack`; the old `HarnessEngine`
+facade and processing modules are removed. Library consumers build
+`traust_core.v1.context.Context` once and use its public services. Command-line
+consumers use the corresponding `traust` doors, installing `traust-engine` separately
+when they need the continuous-ops service.
+
+| Previous API, input or output | Replacement / migration action |
+|---|---|
+| `from traust_engine import HarnessEngine`; `HarnessEngine.load(config_home=...)` | `from traust_core.v1.context import Context`; `Context.from_file(Path("core.yaml"))`, then `context.services()`. For scheduling, use `traust-engine run\|shadow\|record\|diff\|claim --core core.yaml --pack assets.yaml`; `core.yaml` is separate from the old config-home `traust.yaml` and sets `home:` to the deployment home. |
+| `corpus`, finding identity/disposition, `ledger`, file-backed findings projections | Core's `findings`, `assessment`, `artifacts` and optional `ledger` services. Existing files/ledger layers are not imported automatically; legacy-data migration and cutover are separate work. |
+| `adapters`, `_util.safe_exec`, `toolchain` | Core's provider catalog and code-facts/validation services, configured through `Context`; use the corresponding `traust` scanner commands. Engine-internal adapter imports are no longer supported. |
+| `impact`, `osv`, `depsdev`, `applicability` | Core's `exposure` and `below_range` services and `traust impact` commands. The portfolio graph is replaced by recorded inventory/SBOMs, so unmeasured dependencies require SBOM ingestion. |
+| Impact `verified_versions` / `verified_by` inputs | No equivalent integration into impact analysis yet. Core records below-range review findings, but those verdicts do not currently extend impact range evaluation. Do not assume this use case was preserved. |
+| `portfolio` graph queries and `portfolio-graph.db` | Core's `portfolio`, `exposure`, `code_facts` and `insight` services. Graph-only queries such as `internal-coupling`, `crd-consumers`, `ships-module`, `imports-package` and `exports-of` are retired, not compatibility aliases. |
+| `sweep` and file-backed sweep state | Core's `detection_quality` service and `traust sweep` commands. State is core-owned; the first new rule-lane run establishes a new baseline. |
+| `reporting`, `compliance`, metrics journal, model registry | Core's `reporting`, `compliance`, `spend` and `insight` services; `Context.register_model_catalog` registers model pricing. Views/exports replace legacy journal/dashboard files, not their file formats. |
+| Bundled `data/secure-code-audit/` rule packs | The harness's `packs/security/detection/` owns the rule packs. Install the harness pack and configure it through core; the engine wheel no longer supplies it. |
+| Engine extras `graph`, `signing`, `postgres`, `ledger-migration`, `remote`, `s3`, `gcs` | These extras are removed. Select database/provider dependencies in the core deployment; installing an old engine extra no longer enables the feature. |
+| `$TRAUST_CONFIG_HOME` plus `locations.yaml` and per-feature configuration files | Pass a separate core file (for example, `core.yaml`) explicitly with `--core`; it uses `traust.yaml` format, sets `home:` to the deployment home, and contains inline `locations:` resolved beside that file. Use `traust config migrate <old-home>` for old configuration homes. Core ships the stock tool pins, safe-exec profiles and feeds registry, but a feed-backed pack must still pass its registry path with `--feeds`; the engine registers those feeds with core and pins the registry into the run manifest. `--pin` and `--models` are also available on the engine CLI. |
+
+Only core's public `context`, `models` and `errors` modules are consumer APIs; do not
+replace removed engine imports with core provider/repository internals. See
+[traust-core](https://github.com/traust-security/traust-core) for its service API and
+[traust](https://github.com/traust-security/traust) for CLI and pack configuration.
 
 Typed adapter `scan()` results are scanner observations validated against
 `adapter-result.schema.json`, not authored audit findings. Unreported CWEs,
@@ -45,21 +70,17 @@ uv add "traust-engine @ git+ssh://git@<your-forge>/<namespace>/traust-engine.git
 
 Consumers pin library dependencies by commit, not release tag — a tag
 needs a release cut first, a `rev` doesn't, which is what lets the
-dependency chain (contracts to ledger to engine to downstream) propagate
+dependency chain (traust-core to engine) propagate
 PR-to-PR instead of waiting on a tag at every hop:
 
 ```toml
 [project]
 dependencies = [
     "traust-engine",
-    "traust-ledger",
-    "traust-contracts",
 ]
 
 [tool.uv.sources]
 traust-engine = { git = "git@<your-forge>:<namespace>/traust-engine.git", rev = "<commit-sha>" }
-traust-ledger = { git = "git@<your-forge>:<namespace>/traust-ledger.git", rev = "<commit-sha>" }
-traust-contracts = { git = "git@<your-forge>:<namespace>/traust-contracts.git", rev = "<commit-sha>" }
 ```
 
 Note `dependencies` carries bare names, no `>=` floor — the `rev` above is
@@ -78,37 +99,17 @@ ships user-facing changes, run `make bump patch|minor|major`, add a
 CI `release:check-mr`). On merge to `main`, CI tags when `VERSION` is ahead of
 the latest tag.
 
-## Optional extras
-
-```bash
-uv sync --extra graph --extra signing
-```
-
 ## Runtime configuration
 
-Runtime configuration is **config-owned** — there are no environment overrides for
-deployment values. One directory, `$TRAUST_CONFIG_HOME` (default `~/.traust/config`),
-holds every config file; edit them there (the AWS/SSH model).
-
-| Config | Purpose |
-|---|---|
-| `$TRAUST_CONFIG_HOME` | The one config directory (corpus-config, model-registry, feeds, external-tools, safe-exec profiles, product map, budget policy, rule-pack allowlist, hardening weights, dist-git watch, internal vocabulary, optional signing pubkey). Default `~/.traust/config`; else `DeploymentConfigMissing`. |
-| `locations.yaml` → `workspace` | Workspace root the harness reads repos from |
-| `locations.yaml` → `analysis_results` | Findings-side artifact root (local path or `file://`/`s3://`… URI) |
-| `locations.yaml` → `progress_tracker` | Metrics journal + dashboard output root |
-| `locations.yaml` → `feeds_cache` | Feed cache directory |
-| `locations.yaml` → `portfolio_graph` | Portfolio graph DB (defaults under `analysis_results`) |
-| `locations.yaml` → `gitleaks_config` | Gitleaks TOML (overrides the bundled default) |
-| `locations.yaml` → `opengrep_rules` | Opengrep rule pack dir (overrides the bundled default) |
-| `locations.yaml` → `product_definitions` | Product/ownership registry endpoint (optional) |
-| `locations.yaml` → `sarif_tool_uri` | SARIF `informationUri` (optional; omitted when unset) |
-
-Secrets and OS/tool standards stay environment-driven (`GITHUB_TOKEN`, signing key
-material, `XDG_*`, `JAVA_OPTS`, `SAFE_EXEC_DISABLED`).
-
-No config ships in the wheel. Templates for every operational file live in the
-harness repo as `config/*.example.*`; `install_traust` copies them into
-`$TRAUST_CONFIG_HOME`.
+Everything the service needs comes from its arguments: `--core` (a separate `core.yaml`
+file in `traust.yaml` format, with `home:` set to the deployment home and inline
+`locations:` resolved beside the file), `--pack` (the pack's `assets.yaml`), and
+optionally `--pin`, `--feeds` and `--models`. Without an explicit `home:`, core defaults
+to `~/.traust`. For feed-backed packs, pass the feeds registry path with `--feeds`;
+the engine registers that registry with core and pins it into the run manifest. Without
+`--feeds`, feed requirements are not registered, even though core ships a stock registry.
+The harness documents deployment configuration; core owns and ships the stock tool pins,
+safe-exec profiles and feeds registry, while runtime feed registration is explicit.
 
 ## Development
 
@@ -125,13 +126,12 @@ Manual equivalents:
 ```bash
 uv run ruff check .
 uv run ruff format --check .
-uv run pytest -m "not integration" -q   # unit tests (no external binaries)
-uv run pytest -q                        # full suite; integration skips when gitleaks/opengrep absent
+uv run pytest -q
 uv build
 ```
 
-Tests use minimal scanner fixtures under `tests/fixtures/` — no sibling
-`traust` checkout required.
+Tests use minimal fixtures under `tests/fixtures/` (an estate-neutral config
+home and a pack) — no sibling `traust` checkout required.
 
 ## License
 

@@ -1,39 +1,17 @@
-"""Config resolution is owned by traust_contracts (one var, one answer,
-fail closed). The engine no longer resolves config itself and ships none."""
+"""The engine ships no configuration: config resolution is traust-core's `Context`."""
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
-from traust_contracts import config as C
+import yaml
 
+from traust_engine.ops import cli
 
-def test_env_var_wins(monkeypatch, tmp_path):
-    monkeypatch.setenv(C.TRAUST_CONFIG_HOME_ENV, str(tmp_path))
-    (tmp_path / "corpus-config.yaml").write_text("version: 1\n")
-    assert C.config_path("corpus-config.yaml") == tmp_path / "corpus-config.yaml"
-
-
-def test_default_home_used_only_when_it_exists(monkeypatch, tmp_path):
-    monkeypatch.delenv(C.TRAUST_CONFIG_HOME_ENV, raising=False)
-    monkeypatch.setattr(C, "TRAUST_CONFIG_HOME_DEFAULT", tmp_path / "absent")
-    assert C.deployment_config_dir() is None
-    monkeypatch.setattr(C, "TRAUST_CONFIG_HOME_DEFAULT", tmp_path)
-    assert C.deployment_config_dir() == tmp_path
-
-
-def test_missing_required_fails_closed(monkeypatch, tmp_path):
-    monkeypatch.setenv(C.TRAUST_CONFIG_HOME_ENV, str(tmp_path))
-    with pytest.raises(C.DeploymentConfigMissing):
-        C.config_path("corpus-config.yaml")
-
-
-def test_optional_returns_none_when_absent(monkeypatch, tmp_path):
-    monkeypatch.setenv(C.TRAUST_CONFIG_HOME_ENV, str(tmp_path))
-    assert C.optional_config_path("budget-policy.yaml") is None
-    (tmp_path / "budget-policy.yaml").write_text("budget_policy: {}\n")
-    assert C.optional_config_path("budget-policy.yaml") == tmp_path / "budget-policy.yaml"
+CONFIG_FIXTURES = Path(__file__).parent / "fixtures" / "config"
+PACK_FIXTURE = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
 
 
 def test_engine_ships_no_config():
@@ -54,3 +32,25 @@ def test_engine_ships_no_config():
         if p.suffix in (".yaml", ".yml", ".json") and not shipped & set(p.parts)
     ]
     assert stray == [], stray
+
+
+def test_documented_cli_invocation_uses_core_file_deployment_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--core names a separate traust.yaml-format file with an explicit deployment home."""
+    core_file = tmp_path / "core.yaml"
+    deployment_home = tmp_path / "deployment-home"
+    core_file.write_text(yaml.safe_dump({"home": str(deployment_home)}))
+    shutil.copytree(CONFIG_FIXTURES, tmp_path, dirs_exist_ok=True)
+
+    pack_data = yaml.safe_load(PACK_FIXTURE.read_text())
+    pack_data.pop("route_on")
+    pack_file = tmp_path / "assets.yaml"
+    pack_file.write_text(yaml.safe_dump(pack_data))
+
+    fake_user_home = tmp_path / "user-home"
+    monkeypatch.setenv("HOME", str(fake_user_home))
+    assert cli.main(["run", "--once", "--core", str(core_file), "--pack", str(pack_file)]) == 0
+
+    assert (deployment_home / "traust.db").is_file()
+    assert not (fake_user_home / ".traust").exists()

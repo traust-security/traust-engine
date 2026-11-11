@@ -1,29 +1,6 @@
 PYTHON ?= python3
-RELEASE := ./release.py
-BUMP_PARTS := patch minor major
 
-# Shared traust-postgres instance (identical container/image/port/creds/volume
-# as traust-contracts and traust-ledger). The migration e2e creates its own
-# dedicated empty database per run — the importer refuses a non-empty target —
-# so this DSN points at the bootstrap database it connects to for CREATE DATABASE.
-DB_CONTAINER ?= traust-postgres
-DB_IMAGE ?= docker.io/library/postgres:16
-DB_PORT ?= 5432
-DB_USER ?= traust
-DB_PASSWORD ?= traust-test-only
-DB_BOOTSTRAP ?= traust_test
-DB_NAME ?= traust_migration
-TRAUST_MIGRATION_TEST_DATABASE_URL ?= postgresql://$(DB_USER):$(DB_PASSWORD)@127.0.0.1:$(DB_PORT)/$(DB_BOOTSTRAP)
-TRAUST_MIGRATION_DSN ?= postgresql://$(DB_USER):$(DB_PASSWORD)@127.0.0.1:$(DB_PORT)/$(DB_NAME)
-export TRAUST_MIGRATION_TEST_DATABASE_URL TRAUST_MIGRATION_DSN
-
-# Running the migration against real findings, engine-local (no downstream
-# traust dep). All per-run parameters live in one declarative profile file;
-# see migration.example.yaml. Override the path with MIGRATION_PROFILE=...
-MIGRATE := uv run --extra postgres --extra ledger-migration python scripts/migrate.py
-MIGRATION_PROFILE ?= migration.yaml
-
-.PHONY: help setup sync hooks lint lint-fix test db-up db-down db-test db-migration-reset migrate-plan migrate-run migrate-inspect check-release status bump $(BUMP_PARTS)
+.PHONY: help setup sync hooks lint lint-fix test gitleaks
 
 help:
 	@echo "Targets ($(notdir $(CURDIR))):"
@@ -32,16 +9,8 @@ help:
 	@echo "  make hooks          — git config core.hooksPath .githooks"
 	@echo "  make lint           — ruff check + format --check"
 	@echo "  make lint-fix       - ruff --fix"
-	@echo "  make test           — pytest unit tests (excludes integration + postgres e2e)"
-	@echo "  make db-up          — start the shared traust-postgres instance for e2e tests"
-	@echo "  make db-down        — stop and remove the database container"
-	@echo "  make db-test        — db-up + run the Postgres migration e2e tests"
-	@echo "  make migrate-plan   — validate + list decisions, no DB (MIGRATION_PROFILE=migration.yaml)"
-	@echo "  make migrate-run    — import per the profile (backend/layer routing declared there)"
-	@echo "  make migrate-inspect — summarize a saved run (MIGRATION_PROFILE=migration.yaml)"
-	@echo "  make check-release  — VERSION + CHANGELOG gate for current branch vs main"
-	@echo "  make status         — current version, tag, git state"
-	@echo "  make bump patch|minor|major — bump VERSION + pyproject.toml"
+	@echo "  make test           — pytest unit tests, excludes integration (parallel via pytest-xdist)"
+	@echo "  make gitleaks        — fetch the pinned gitleaks binary for this arch (image build input)"
 
 setup: sync hooks
 	@echo "ready — local hooks enabled (.githooks). Bypass: git commit --no-verify"
@@ -62,63 +31,27 @@ lint-fix:
 	uv run ruff format .
 
 test:
-	uv run pytest tests/ -q -m "not integration and not postgres"
+	uv run pytest tests/ -q -n auto -m "not integration"
 
-db-up: ## Start the shared traust-postgres instance (same as contracts/ledger)
-	@if podman container exists $(DB_CONTAINER) 2>/dev/null; then \
-		echo "$(DB_CONTAINER) already running"; \
-	else \
-		podman run --name $(DB_CONTAINER) --rm -d \
-			-e POSTGRES_USER=$(DB_USER) \
-			-e POSTGRES_PASSWORD=$(DB_PASSWORD) \
-			-e POSTGRES_DB=$(DB_BOOTSTRAP) \
-			-p 127.0.0.1:$(DB_PORT):5432 \
-			-v traust-postgres-data:/var/lib/postgresql/data \
-			$(DB_IMAGE); \
-		echo "waiting for database..."; \
-		for i in $$(seq 1 30); do \
-			podman exec $(DB_CONTAINER) pg_isready -U $(DB_USER) -q 2>/dev/null && break; \
-			sleep 1; \
-		done; \
-		echo "$(DB_CONTAINER) ready on port $(DB_PORT)"; \
-	fi
-	@echo "TRAUST_MIGRATION_TEST_DATABASE_URL=$(TRAUST_MIGRATION_TEST_DATABASE_URL)"
+# The container build's gitleaks input (Containerfile COPY gitleaks): the upstream
+# v8.30.1 release artifact for the BUILD MACHINE's architecture, digest-verified —
+# never committed. Multi-arch image builds fetch inside each arch's build step.
+GITLEAKS_VERSION := 8.30.1
+GITLEAKS_SHA256_amd64 := 88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509
+GITLEAKS_SHA256_arm64 := 00e91bbe655bd7c47753e8cfe61cb76ea1a5d7e7702fe161ee40102b46b3823b
+# ARCH overrides the fetch for cross-builds: pass the image build's TARGETARCH
+# (e.g. `make gitleaks ARCH=arm64` when building an arm image from an amd64 host);
+# the default is the build machine's own.
+GITLEAKS_ARCH ?= $(if $(ARCH),$(ARCH),$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'))
 
-db-down:
-	@podman stop $(DB_CONTAINER) 2>/dev/null || true
-
-db-test: db-up
-	uv run --extra postgres pytest tests/ -q -m postgres
-
-db-migration-reset: db-up ## Drop+recreate the dedicated empty migration DB on the shared instance
-	@podman exec $(DB_CONTAINER) dropdb -U $(DB_USER) --if-exists $(DB_NAME)
-	@podman exec $(DB_CONTAINER) createdb -U $(DB_USER) $(DB_NAME)
-	@echo "TRAUST_MIGRATION_DSN=$(TRAUST_MIGRATION_DSN)"
-
-migrate-plan: ## Validate + list decisions, no database (clears its own output first)
-	$(MIGRATE) plan --profile $(MIGRATION_PROFILE) --fresh
-
-migrate-run: db-migration-reset ## Import per the profile (clears its own output first)
-	$(MIGRATE) run --profile $(MIGRATION_PROFILE) --fresh
-
-migrate-inspect: ## Summarize a saved migration result
-	$(MIGRATE) inspect --profile $(MIGRATION_PROFILE)
-
-check-release:
-	@base="$${RELEASE_BASE:-origin/main}"; \
-	head="$${RELEASE_HEAD:-HEAD}"; \
-	$(PYTHON) ci/gates.py mr "$$base" "$$head"
-
-$(BUMP_PARTS):
-	@:
-
-status:
-	$(PYTHON) $(RELEASE) status
-
-bump:
-	@part="$(filter $(BUMP_PARTS),$(MAKECMDGOALS))"; \
-	if [ -z "$$part" ]; then \
-		echo "usage: make bump patch|minor|major" >&2; \
-		exit 1; \
-	fi; \
-	$(PYTHON) $(RELEASE) bump $$part
+gitleaks:
+	@test "$(GITLEAKS_ARCH)" = "amd64" || test "$(GITLEAKS_ARCH)" = "arm64" \
+		|| { echo "unsupported build arch: $(GITLEAKS_ARCH)"; exit 1; }
+	curl -sSfL --retry 3 -o gitleaks.tar.gz \
+		"https://github.com/gitleaks/gitleaks/releases/download/v$(GITLEAKS_VERSION)/gitleaks_$(GITLEAKS_VERSION)_linux_$(subst amd64,x64,$(GITLEAKS_ARCH)).tar.gz"
+	tar -xzf gitleaks.tar.gz gitleaks
+	echo "$(GITLEAKS_SHA256_$(GITLEAKS_ARCH))  gitleaks" | shasum -a 256 -c -
+	rm gitleaks.tar.gz
+	@echo "gitleaks $(GITLEAKS_VERSION) $(GITLEAKS_ARCH) ready at ./gitleaks (never committed)"
+	@test "$(GITLEAKS_ARCH)" = "$(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')" \
+		|| echo "note: fetched for $(GITLEAKS_ARCH), not this machine's arch — pass ARCH= to match the image build's TARGETARCH"

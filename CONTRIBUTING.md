@@ -59,13 +59,14 @@ doesn't. After your change merges to main, bump the pin to the new commit in
 each direct downstream repo's `pyproject.toml`, `uv lock`, and run that
 repo's own tests before opening its PR.
 
-Direct downstream: `traust`.
+No repo pins traust-engine any more: traust depends on traust-core only, and the
+engine is deployed as the `traust-engine` service.
 
 ## Running tests
 
 ```bash
-make test              # unit tests (no external binaries needed)
-uv run pytest -q       # full suite (integration needs gitleaks/opengrep)
+make test              # the suite, in parallel
+uv run pytest -q       # the same, serially
 ```
 
 ## Architecture

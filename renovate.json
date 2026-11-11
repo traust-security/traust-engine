@@ -1,0 +1,68 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [ "config:best-practices", "github>konflux-ci/mintmaker-presets:cve-automerge-all" ],
+  "packageRules": [
+    {
+      "description": "Keep Python version pinned to minor",
+      "matchPackageNames": [ "registry.access.redhat.com/hi/python" ],
+      "matchUpdateTypes": [ "major", "minor" ],
+      "enabled": false
+    },
+    {
+      "description": "Label all minor, patch, digest and pin updates (any manager, including grouped PRs) with allow-automatic-merge so Prow/Tide merges them once builds and checks are green. Major updates are left for manual review.",
+      "matchUpdateTypes": [ "digest", "minor", "patch", "pin", "pinDigest" ],
+      "addLabels": [ "allow-automatic-merge" ]
+    },
+    {
+      "description": "Major updates are never labelled allow-automatic-merge; flag them for manual review.",
+      "matchUpdateTypes": [ "major" ],
+      "addLabels": [ "major-update", "manual-review-required", "area/dependency" ]
+    },
+    {
+      "description": "Group GitHub Actions updates",
+      "matchManagers": [ "github-actions" ],
+      "matchUpdateTypes": [ "digest", "minor", "patch", "pinDigest" ],
+      "groupName": "GitHub Actions",
+      "groupSlug": "github-actions-source-code-intelligence",
+      "commitMessageSuffix": "in source-code-intelligence"
+    },
+    {
+      "description": "Group Go dependencies minor, patch and digest updates",
+      "matchManagers": [ "gomod" ],
+      "matchUpdateTypes": [ "digest", "minor", "patch" ],
+      "groupName": "Go dependencies",
+      "groupSlug": "go-dependencies-source-code-intelligence",
+      "commitMessageSuffix": "in source-code-intelligence"
+    },
+    {
+      "description": "Group Python dependencies minor, patch and digest updates",
+      "matchManagers": [ "pep621", "pip_requirements" ],
+      "matchUpdateTypes": [ "digest", "minor", "patch" ],
+      "groupName": "Python dependencies",
+      "groupSlug": "python-dependencies-source-code-intelligence",
+      "commitMessageSuffix": "in source-code-intelligence"
+    },
+    {
+      "description": "Group npm dependencies minor, patch and digest updates",
+      "matchManagers": [ "npm" ],
+      "matchUpdateTypes": [ "digest", "minor", "patch" ],
+      "groupName": "npm dependencies",
+      "groupSlug": "npm-dependencies-source-code-intelligence",
+      "commitMessageSuffix": "in source-code-intelligence"
+    },
+    {
+      "description": "Exempt our own traust-security packages and Konflux-built images from the dependency cooldown so releases propagate between repositories immediately.",
+      "matchPackageNames": [
+        "traust-security/**",
+        "github.com/traust-security/**",
+        "quay.io/redhat-user-workloads/source-code-intelligence-tenant/**"
+      ],
+      "minimumReleaseAge": null
+    },
+    {
+      "description": "No cooldown exemptions for npm packages: always enforce the minimum release age for anything using the npm datasource (the npm manager and any other manager), overriding any exemption above.",
+      "matchDatasources": [ "npm" ],
+      "minimumReleaseAge": "3 days"
+    }
+  ]
+}

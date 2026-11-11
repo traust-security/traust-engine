@@ -10,11 +10,4 @@
 # Disposition ledger and corpus resolution
 /src/traust_engine/corpus/ @traust-security/traust-admins
 
-# Finding identity (traust-ledger) and report integrity validation
-/src/traust_engine/_util/finding_identity.py @traust-security/traust-admins
-/src/traust_engine/_util/safe_exec.py @traust-security/traust-admins
-/src/traust_engine/metrics/history.py @traust-security/traust-admins
-/src/traust_engine/reporting/validate.py @traust-security/traust-admins
-/tests/test_validate_report.py @traust-security/traust-admins
-
 * @traust-security/traust-admins

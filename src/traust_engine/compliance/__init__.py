@@ -1,1 +1,0 @@
-"""Compliance scope + boundary resolution."""
