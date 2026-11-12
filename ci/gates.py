@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""CI gates: conventional-commit lint, semver bump hints, release readiness.
+"""CI gates: conventional-commit lint.
 
 Used by:
   - .githooks/commit-msg  (subject validation)
-  - .gitlab-ci.yml        (range, mr commands)
-  - release.py            (bump_level import)
+  - .gitlab-ci.yml        (range command)
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,10 +23,6 @@ HEADER_RE = re.compile(
 MERGE_RE = re.compile(r"^Merge (branch|commit|remote-tracking branch|pull request) ")
 REVERT_RE = re.compile(r"^Revert ")
 HINT = "expected: type(scope): subject  (e.g. feat(adapters): add joern cache)"
-
-VERSION_FILE = "VERSION"
-CHANGELOG_FILE = "CHANGELOG.md"
-CHANGELOG_SECTION_RE = re.compile(r"^## \[(?P<version>\d+\.\d+\.\d+)\]", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -91,84 +85,6 @@ def validate_range(base: str, head: str, *, cwd: Path | None = None) -> str | No
     return None
 
 
-# --- Semver bump ---
-
-
-def bump_level(commits: Iterable[Commit]) -> str | None:
-    """Determine required semver bump from commit list: major > minor > patch > None."""
-    level: str | None = None
-    for commit in commits:
-        if MERGE_RE.match(commit.subject) or REVERT_RE.match(commit.subject):
-            continue
-        match = HEADER_RE.match(commit.subject)
-        if not match:
-            continue
-        if match.group("breaking") or "BREAKING CHANGE" in commit.body:
-            return "major"
-        typ = match.group("type")
-        if typ == "feat":
-            level = "minor"
-        elif typ in {"fix", "perf"} and level is None:
-            level = "patch"
-    return level
-
-
-def bump_between(base: str, head: str, *, cwd: Path | None = None) -> str | None:
-    """Bump level for commits in base..head."""
-    return bump_level(_log(f"{base}..{head}", cwd=cwd))
-
-
-# --- Release readiness (VERSION + CHANGELOG gate) ---
-
-
-def _semver_tuple(version: str) -> tuple[int, int, int]:
-    return tuple(map(int, version.split(".")))
-
-
-def _version_at_ref(ref: str, *, cwd: Path) -> str:
-    return _git("show", f"{ref}:{VERSION_FILE}", cwd=cwd).strip()
-
-
-def check_release_mr(base: str, head: str, *, cwd: Path | None = None) -> str | None:
-    """Validate VERSION bump and CHANGELOG entry for an MR. Returns error or None."""
-    root = Path(cwd) if cwd else Path.cwd()
-    _resolve(base, cwd=root)
-    _resolve(head, cwd=root)
-
-    needed = bump_between(base, head, cwd=root)
-    base_version = _version_at_ref(base, cwd=root)
-    head_version = (root / VERSION_FILE).read_text(encoding="utf-8").strip()
-
-    if needed is None:
-        if _semver_tuple(head_version) > _semver_tuple(base_version) and not _changelog_has(
-            head_version, cwd=root
-        ):
-            return (
-                f"VERSION bumped to {head_version} but "
-                f"CHANGELOG.md has no ## [{head_version}] section"
-            )
-        return None
-
-    if _semver_tuple(head_version) <= _semver_tuple(base_version):
-        return (
-            f"release-worthy commits since {base} (expected {needed} bump) but "
-            f"VERSION is still {head_version}; bump from {base_version} in this MR"
-        )
-
-    if not _changelog_has(head_version, cwd=root):
-        return f"VERSION is {head_version} but CHANGELOG.md has no ## [{head_version}] section"
-
-    return None
-
-
-def _changelog_has(version: str, *, cwd: Path) -> bool:
-    path = cwd / CHANGELOG_FILE
-    if not path.is_file():
-        return False
-    text = path.read_text(encoding="utf-8")
-    return any(m.group("version") == version for m in CHANGELOG_SECTION_RE.finditer(text))
-
-
 # --- CLI ---
 
 
@@ -179,17 +95,10 @@ def _fail_commit(message: str) -> int:
     return 1
 
 
-def _fail_release(message: str) -> int:
-    print("release check failed:", file=sys.stderr)
-    print(f"  {message}", file=sys.stderr)
-    print("  fix: make bump patch|minor|major and add ## [X.Y.Z] to CHANGELOG.md", file=sys.stderr)
-    return 1
-
-
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
     if not args:
-        print("usage: gates.py {subject|range|bump|mr} ...", file=sys.stderr)
+        print("usage: gates.py {subject|range} ...", file=sys.stderr)
         return 2
 
     match args[0]:
@@ -215,36 +124,9 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             return 0
 
-        case "bump":
-            if len(args) < 3:
-                print("usage: gates.py bump <base> <head>", file=sys.stderr)
-                return 2
-            try:
-                print(bump_between(args[1], args[2]) or "none")
-            except GitError as exc:
-                print(f"gates: {exc}", file=sys.stderr)
-                return 1
-            return 0
-
-        case "mr":
-            if len(args) < 3:
-                print("usage: gates.py mr <base> <head> [--root DIR]", file=sys.stderr)
-                return 2
-            root = None
-            if len(args) >= 5 and args[3] == "--root":
-                root = Path(args[4])
-            try:
-                if err := check_release_mr(args[1], args[2], cwd=root):
-                    return _fail_release(err)
-            except GitError as exc:
-                print(f"gates: {exc}", file=sys.stderr)
-                return 1
-            print(f"ok: release metadata for {args[1]}..{args[2]}")
-            return 0
-
         case _:
             print(f"unknown command: {args[0]}", file=sys.stderr)
-            print("usage: gates.py {subject|range|bump|mr} ...", file=sys.stderr)
+            print("usage: gates.py {subject|range} ...", file=sys.stderr)
             return 2
 
 
