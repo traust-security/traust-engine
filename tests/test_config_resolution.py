@@ -20,7 +20,7 @@ def test_engine_ships_no_config():
     Two data trees ship by design and are not configuration: the rule pack
     (secure-code-audit) and the public compliance reference data (NIST
     800-53 spine and profiles, framework catalogs, the control-to-check
-    mapping; owner decision 2026-10-17). Neither varies per estate.
+    mapping). Neither varies per estate.
     """
     import traust_engine
 
