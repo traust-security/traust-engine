@@ -22,7 +22,6 @@ from uuid import UUID
 import pytest
 import yaml
 from traust_core.v1.context import Config, Context
-from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.inventory import RefName
 from traust_core.v1.models.operations import (
@@ -30,7 +29,6 @@ from traust_core.v1.models.operations import (
     LaneName,
     ModelName,
     ModelUsage,
-    OrderFilter,
     OrderRequest,
     OrderState,
     ProviderName,
@@ -561,34 +559,26 @@ def test_a_pair_still_waiting_for_admission_is_not_taken_over(context: Context) 
     assert context.services().ops.get(planned.id).state == OrderState.PLANNED
 
 
-def test_a_takeover_does_not_recreate_an_order_completed_mid_listing(context: Context) -> None:
-    """An order completed by another runner between the listing and the takeover must not be
-    re-created and re-run: `start` would store a fresh leased order for its pair."""
-    app, other = _repository(context), _repository(context, "example/other")
+def test_a_claim_never_recreates_an_order_another_runner_completed(context: Context) -> None:
+    """The lease is one bounded claim, never a `start`: an order another runner completed
+    cannot be re-created and re-run, whatever happens around this runner's claim. The
+    pre-walk's mid-listing race — a victim completed between the listing and the
+    takeover — is gone with the listing itself."""
+    app = _repository(context)
     held = _order(context, "repo_state", app, priority=0)
-    waiting = _order(context, "diff_scan", app, priority=1)  # the top queued order
-    victim = _order(context, "repo_state", other, priority=2)
+    _order(context, "diff_scan", app, priority=1)  # the top queued order: waits for the holder
+    victim = _order(context, "repo_state", _repository(context, "example/other"), priority=2)
     _hold(context, held, "a")
     services = context.services()
-    real_list = services.ops.list
-    raced = False
+    services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
+    services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
 
-    def list_then_complete(filter: OrderFilter, page: Any) -> Any:
-        out = real_list(filter, page)
-        nonlocal raced
-        if not raced and any(o.id == victim.id for o in out.items):
-            raced = True  # another runner claims and completes it after our listing saw it
-            services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
-            services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
-        return out
+    def no_start(*args: Any, **kw: Any) -> RunOrder:
+        raise AssertionError("the runner leases through claim; start would re-create a pair")
 
-    services.ops.list = list_then_complete  # type: ignore[method-assign]
+    services.ops.start = no_start  # type: ignore[method-assign]
     commands = Commands()
-    done = Runner(
-        services, Pack.load(PACK), WorkerId("b"), timedelta(minutes=5), HOSTS, commands
-    ).claim_once()
-    assert done is None
+    assert _runner(context, commands, worker=WorkerId("b")).claim_once() is None
     assert commands.seen == []
-    remaining = list(every_item(lambda p: real_list(OrderFilter(states=tuple(OrderState)), p)))
-    assert {o.id for o in remaining} == {held.id, waiting.id, victim.id}
     assert services.ops.get(victim.id).state == OrderState.SUCCEEDED
+    assert services.ops.get(held.id).state == OrderState.LEASED
