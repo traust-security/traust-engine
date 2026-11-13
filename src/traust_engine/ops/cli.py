@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import re
+import signal
 import socket
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Collection, Iterator, Sequence
@@ -259,13 +261,38 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     # day before the bounding — while a claimed order loops straight back for the
     # next one. Each pass opens its own correlation scope (the tick loop's own
     # rule): one request id per claim, never one for the runner's whole life.
-    while True:
+    #
+    # The loop stops on TERM or INT, not by being killed: the signal sets the
+    # flag, the current order runs to its completion (its lease renewed while
+    # it runs — a kill mid-order would strand the order until its lease
+    # lapses), and the runner exits before claiming the next one. The idle
+    # backoff waits on the flag, so a stopped runner leaves its backoff
+    # immediately. (A wrapper's TERM trap still reaps the process; this is
+    # the in-process half of that contract.)
+    stop = threading.Event()
+
+    def _stopping(signum: int, frame: Any) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _stopping)
+    signal.signal(signal.SIGINT, _stopping)
+    idled = False
+    while not stop.is_set():
         with correlation_scope(_request_id("claim"), actor_kind=ActorKind.MACHINE):
             order = runner.claim_once()
         if order is None:
-            time.sleep(args.idle.total_seconds())
+            if not idled:
+                # The queue drained: one answer in the claim-once shape, so a
+                # watcher can tell an idle loop from a wedged one — the
+                # backoff itself stays silent (one line per drain, never one
+                # per tick).
+                print(json.dumps({"claimed": None}), flush=True)
+                idled = True
+            stop.wait(args.idle.total_seconds())
             continue
+        idled = False
         print(order.model_dump_json(), flush=True)
+    return 0
 
 
 def _parser() -> argparse.ArgumentParser:

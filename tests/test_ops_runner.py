@@ -7,7 +7,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import queue
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -582,3 +584,41 @@ def test_a_claim_never_recreates_an_order_another_runner_completed(context: Cont
     assert commands.seen == []
     assert services.ops.get(victim.id).state == OrderState.SUCCEEDED
     assert services.ops.get(held.id).state == OrderState.LEASED
+
+
+def test_the_claim_loop_stops_on_term(tmp_path: Path) -> None:
+    """`--loop` exits cleanly on SIGTERM: the signal sets the stop flag, the idle
+    backoff wakes immediately, and the process answers 0 — not a kill mid-iteration
+    that strands the running order until its lease lapses."""
+    core = _core(tmp_path)
+    common = ["--core", str(core), "--pack", str(PACK)]
+    # An empty queue and a long idle backoff: without the flag the loop would
+    # sit in its backoff for minutes, ignoring the signal.
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "traust_engine.ops.cli", "claim", "--loop", "--idle", "1h", *common],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        # The loop is up once it has answered one empty queue (its first
+        # {"claimed": null}); a reader thread keeps the pipe draining.
+        lines: queue.Queue[str] = queue.Queue()
+
+        def drain() -> None:
+            for line in proc.stdout:
+                lines.put(line)
+
+        threading.Thread(target=drain, daemon=True).start()
+        line = lines.get(timeout=100)
+        assert line.strip().startswith('{"claimed"'), f"unexpected first line: {line!r}"
+        proc.send_signal(signal.SIGTERM)
+        rc = proc.wait(timeout=30)
+        assert rc == 0, f"exit {rc}: {proc.stderr.read()}"
+        # The idle backoff (1h) was interrupted by the signal, not waited
+        # out, and no further claim ran after it.
+        assert lines.empty()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
