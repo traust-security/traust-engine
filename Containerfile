@@ -38,11 +38,21 @@ RUN uv pip install --no-deps /app/dist/*.whl
 # includes it through .containerignore's !gitleaks): the upstream v8.30.1 release
 # artifact for the build's target architecture (`make gitleaks` fetches and verifies
 # the build machine's; a cross-build passes ARCH=<TARGETARCH>, and a multi-arch
-# build fetches per arch in its build step). The
+# build fetches per arch in its build step). Konflux builds instead prefetch the
+# release tarballs listed in artifacts.lock.yaml into /cachi2/output/deps/generic,
+# which is preferred when present. The
 # builder has a shell, so the digest is verified here against the TARGETARCH pin and
 # the runtime copy below refuses to ship anything else.
 ARG TARGETARCH=amd64
-COPY gitleaks /tmp/gitleaks
+ARG GITLEAKS_VERSION=8.30.1
+# LICENSE always matches, so the gitleaks* glob may match nothing (Konflux builds).
+COPY LICENSE gitleaks* /tmp/gitleaks-input/
+RUN tarball="/cachi2/output/deps/generic/gitleaks_${GITLEAKS_VERSION}_linux_$(echo "$TARGETARCH" | sed 's/amd64/x64/').tar.gz"; \
+    if [ -f "$tarball" ]; then \
+      python3 -c 'import sys, tarfile; tarfile.open(sys.argv[1]).extract("gitleaks", "/tmp", filter="data")' "$tarball"; \
+    elif [ -f /tmp/gitleaks-input/gitleaks ]; then mv /tmp/gitleaks-input/gitleaks /tmp/gitleaks; \
+    else echo "gitleaks build input missing: run 'make gitleaks' first" >&2; exit 1; fi \
+    && rm -rf /tmp/gitleaks-input
 RUN case "$TARGETARCH" in \
       amd64) echo "88f91962aa2f93ac6ab281d553b9e125f5197bbbce38f9f2437f7299c32e5509" ;; \
       arm64) echo "00e91bbe655bd7c47753e8cfe61cb76ea1a5d7e7702fe161ee40102b46b3823b" ;; \
