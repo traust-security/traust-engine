@@ -24,13 +24,16 @@ from uuid import UUID
 import pytest
 import yaml
 from traust_core.v1.context import Config, Context
+from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.inventory import RefName
 from traust_core.v1.models.operations import (
+    OPEN_ORDER_STATES,
     JobResult,
     LaneName,
     ModelName,
     ModelUsage,
+    OrderFilter,
     OrderRequest,
     OrderState,
     ProviderName,
@@ -106,19 +109,44 @@ def _runner(
     lease: timedelta = timedelta(minutes=5),
     worker: WorkerId = WORKER,
 ) -> Runner:
-    return Runner(context.services(), Pack.load(PACK), worker, lease, HOSTS, run=commands)
+    # labels=["llm"]: these tests claim diff_scan orders, the fixture's skill-session
+    # stand-in — a host that carries the agent harness, exercising the mirror-affinity
+    # mechanics whatever the asset's executor class.
+    return Runner(
+        context.services(), Pack.load(PACK), worker, lease, HOSTS, run=commands, labels=["llm"]
+    )
 
 
 def test_only_command_assets_are_runnable() -> None:
     pack = Pack.load(PACK)
-    assert set(runnable(pack)) == {"feeds_cache", "repo_state", "diff_scan"}
-    assert "dependency_graph" not in runnable(pack)  # a skill session: a launcher's job
+    assert set(runnable(pack)) == {"feeds_cache", "repo_state"}
+    assert "dependency_graph" not in runnable(pack)  # a model role without a command
+    # a skill session: a runner pool's job — this engine's image has no agent harness
+    assert "diff_scan" not in runnable(pack)
+    assert "diff_scan" in runnable(pack, ["llm"])  # a host that carries the harness
 
 
 def test_a_disabled_asset_is_not_claimable() -> None:
     raw = yaml.safe_load(PACK.read_text())
     raw["assets"]["diff_scan"]["enabled"] = False
-    assert "diff_scan" not in runnable(Pack.model_validate(raw))
+    # the label include does not rescue a disabled asset either
+    assert "diff_scan" not in runnable(Pack.model_validate(raw), ["llm"])
+
+
+def test_an_llm_labeled_order_is_left_for_its_pool(context: Context) -> None:
+    """The claim never leases a skill session's order: the engine image has no agent
+    CLI, so running one would only crash it. The order stays queued for the runner
+    pool whose image carries the harness."""
+    _submit(context, "diff_scan", priority=0, repo=True)
+    commands = Commands()
+    done = Runner(
+        context.services(), Pack.load(PACK), WORKER, timedelta(minutes=5), HOSTS, commands
+    ).claim_once()
+    assert done is None, "the llm-labeled order must not be leased"
+    assert commands.seen == []
+    ops = context.services().ops
+    orders = list(every_item(lambda page: ops.list(OrderFilter(states=OPEN_ORDER_STATES), page)))
+    assert [o.asset for o in orders] == ["diff_scan"] and orders[0].state == OrderState.QUEUED
 
 
 @pytest.mark.parametrize(
@@ -173,6 +201,7 @@ def test_a_routed_order_gets_the_rule_that_routed_it(context: Context, tmp_path:
         timedelta(minutes=5),
         HOSTS,
         commands,
+        labels=["llm"],
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED
@@ -191,6 +220,7 @@ def test_an_order_with_no_rule_cannot_fill_a_rule_token(context: Context, tmp_pa
         timedelta(minutes=5),
         HOSTS,
         commands,
+        labels=["llm"],
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.FAILED
@@ -340,12 +370,13 @@ def test_a_skill_session_with_a_command_runs_with_its_role(
         "--repo",
         "{repo_url}",
     ]
+    raw["assets"]["dependency_graph"]["runner"] = {"labels": ["llm"]}
     pack = Pack.model_validate(raw)
-    assert "dependency_graph" in runnable(pack)
+    assert "dependency_graph" in runnable(pack, ["llm"])
     _submit(context, "dependency_graph", priority=0, repo=True)
     commands = Commands()
     done = Runner(
-        context.services(), pack, WORKER, timedelta(minutes=5), HOSTS, commands
+        context.services(), pack, WORKER, timedelta(minutes=5), HOSTS, commands, labels=["llm"]
     ).claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED
     assert commands.seen == [
@@ -531,6 +562,7 @@ def test_a_repositorys_orders_wait_while_their_holder_runs(context: Context) -> 
         timedelta(minutes=5),
         HOSTS,
         gated,
+        labels=["llm"],
     )
     thread = threading.Thread(target=holder.claim_once)
     thread.start()

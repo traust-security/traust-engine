@@ -18,7 +18,13 @@ def test_a_session_receives_the_claiming_worker_and_order(context: Context) -> N
     order = _submit(context, "diff_scan", repo=True)
     commands = Commands()
     result = Runner(
-        context.services(), Pack.model_validate(raw), WORKER, timedelta(minutes=5), HOSTS, commands
+        context.services(),
+        Pack.model_validate(raw),
+        WORKER,
+        timedelta(minutes=5),
+        HOSTS,
+        commands,
+        labels=["llm"],
     ).claim_once()
     assert commands.seen == [["session", "--run-id", str(order.id), "--worker", str(WORKER)]]
     assert result.state == OrderState.SUCCEEDED and result.lease_holder is None

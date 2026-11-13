@@ -31,3 +31,4 @@ assets:
     admission: {estimate_usd: "2.00"}
     run: [/vuln-scan, --diff, --, "{repo_url}"]
     params: {repo_url: HttpsRepoUrl, sha: GitSha}
+    runner: {labels: [llm]}
