@@ -245,7 +245,9 @@ def _diff(args: argparse.Namespace, core: Context, pack: Pack) -> int:
 
 def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     worker = WorkerId(args.worker or f"{socket.gethostname()}:{os.getpid()}")
-    runner = Runner(core.services(), pack, worker, args.lease, core.config.forge_hosts)
+    runner = Runner(
+        core.services(), pack, worker, args.lease, core.config.forge_hosts, labels=args.label
+    )
     if not args.loop:
         order = runner.claim_once()
         if order is None:
@@ -358,6 +360,17 @@ def _parser() -> argparse.ArgumentParser:
         help="empty-queue backoff while --loop (the claim is one bounded"
         " query; the audit's 10s empty poll backed off to 60s)",
     )
+    claim.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        metavar="RUNNER_LABEL",
+        help=(
+            "also claim assets whose runner labels carry this (default: the llm-labeled"
+            " skill sessions are left for runner pools whose images carry the agent"
+            " harness; pass --label llm on a host that has one)"
+        ),
+    )
     return ap
 
 
@@ -447,7 +460,9 @@ def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
                     engine = stack.enter_context(_loop(core, pack, args.router))
                 else:
                     if args.op == "claim":
-                        core.preflight(pack.assets[name].requires for name in runnable(pack))
+                        core.preflight(
+                            pack.assets[name].requires for name in runnable(pack, args.label)
+                        )
                     engine = None
             except Exception as error:
                 _debug_failure(error)

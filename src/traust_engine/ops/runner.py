@@ -10,7 +10,7 @@ import logging
 import re
 import subprocess
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import copy_context
 from datetime import timedelta
 from time import perf_counter
@@ -30,7 +30,7 @@ from traust_core.v1.models.values import HttpsRepoUrl
 
 from traust_engine.ops.completion import complete
 from traust_engine.ops.events import execution_scope, lifecycle
-from traust_engine.ops.pack import AssetSpec, Pack
+from traust_engine.ops.pack import AGENT_LABEL, AssetSpec, Pack
 
 log = logging.getLogger(__name__)
 
@@ -60,10 +60,23 @@ def _by_exit(done: subprocess.CompletedProcess[str]) -> JobResult:
     return JobResult.failed(CRASHED)
 
 
-def runnable(pack: Pack) -> tuple[AssetName, ...]:
-    """The assets this runner makes: enabled, with a command; a model role without one has
-    nothing to start its session with."""
-    return tuple(name for name, spec in pack.assets.items() if spec.enabled and spec.run)
+def runnable(pack: Pack, labels: Collection[str] = ()) -> tuple[AssetName, ...]:
+    """The assets this runner makes: enabled, with a command, and not routed to another
+    executor by its runner labels. An `llm`-labeled asset is a skill session — a runner
+    pool's unit of work (its image carries the agent harness); this engine's image has
+    no agent CLI, so claiming one would only crash it. A host that does carry the
+    harness (the local rig, an operator workstation with the agent CLI logged in)
+    passes the label to include those assets. Unlabeled assets stay claimable: the
+    label vocabulary is a proposal, and a pack yet to carry it names no executor this
+    runner refuses to be."""
+    included = set(labels)
+    return tuple(
+        name
+        for name, spec in pack.assets.items()
+        if spec.enabled
+        and spec.run
+        and (AGENT_LABEL not in spec.runner.labels or AGENT_LABEL in included)
+    )
 
 
 class UnresolvedParam(TraustError):
@@ -93,6 +106,7 @@ class Runner:
         lease_for: timedelta,
         hosts: Sequence[str],
         run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+        labels: Collection[str] = (),
     ) -> None:
         self._services = services
         self._pack = pack
@@ -100,6 +114,7 @@ class Runner:
         self._lease_for = lease_for
         self._hosts = tuple(hosts)
         self._run = run or _run
+        self._labels = tuple(labels)
 
     def claim_once(self) -> RunOrder | None:
         """Run one queued order to completion; None when no eligible order can be leased."""
@@ -210,9 +225,8 @@ class Runner:
         in the same transaction, so the runner needs no separate sweep. An order
         another runner completes mid-claim cannot be re-created either: the claim
         leases a queued row or answers none, never `start`ing a fresh one for a pair."""
-        return self._services.ops.claim(
-            self._worker, self._lease_for, set(runnable(self._pack)), mirror_affinity=True
-        )
+        assets = set(runnable(self._pack, self._labels))
+        return self._services.ops.claim(self._worker, self._lease_for, assets, mirror_affinity=True)
 
     def _values(self, order: RunOrder, spec: AssetSpec) -> dict[str, str]:
         """What the order supplies: its id, the asset's model role, the rule that routed it, and
