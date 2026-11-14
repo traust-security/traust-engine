@@ -90,11 +90,29 @@ class ModelRole(Dto):
     role: str
 
 
-# Dto: runner fields (params, runner, ...) are in the schema but not read here; `run` and
-# `model` only say whether a runner can make the asset at all.
+class RunnerSpec(Dto):
+    """The asset's runner declaration: the labels name the executor class the asset's
+    commands need. The vocabulary is the pack's own proposal (`deterministic` — a command
+    any host with the CLI runs; `llm` — a skill session, a runner pool whose image carries
+    the agent harness). The engine's claim workers run the first class and skip the second:
+    their image has no agent CLI to start a session with."""
+
+    labels: tuple[str, ...] = ()
+
+
+# The label that routes an asset away from this engine's claim workers: a skill session
+# (a `traust session run` command) needs an agent harness the engine image does not carry —
+# claiming one only produces a runner-crashed order. Those assets belong to the runner pools
+# whose worker images ship the harness (SCI's pool, through core's recording start door).
+AGENT_LABEL = "llm"
+
+
+# `params` is in the schema but not read here; `run` and `model` only say whether a runner can
+# make the asset at all, and `runner` says which class of runner makes it.
 class AssetSpec(Dto):
     run: tuple[str, ...] = ()
     model: ModelRole | None = None
+    runner: RunnerSpec = RunnerSpec()
     enabled: bool = True
     requires: Requirement = Requirement()
     partitions: Literal["dynamic:repo"] | None = None

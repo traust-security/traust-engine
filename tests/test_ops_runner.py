@@ -7,7 +7,9 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import queue
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -26,6 +28,7 @@ from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.inventory import RefName
 from traust_core.v1.models.operations import (
+    OPEN_ORDER_STATES,
     JobResult,
     LaneName,
     ModelName,
@@ -106,19 +109,44 @@ def _runner(
     lease: timedelta = timedelta(minutes=5),
     worker: WorkerId = WORKER,
 ) -> Runner:
-    return Runner(context.services(), Pack.load(PACK), worker, lease, HOSTS, run=commands)
+    # labels=["llm"]: these tests claim diff_scan orders, the fixture's skill-session
+    # stand-in — a host that carries the agent harness, exercising the mirror-affinity
+    # mechanics whatever the asset's executor class.
+    return Runner(
+        context.services(), Pack.load(PACK), worker, lease, HOSTS, run=commands, labels=["llm"]
+    )
 
 
 def test_only_command_assets_are_runnable() -> None:
     pack = Pack.load(PACK)
-    assert set(runnable(pack)) == {"feeds_cache", "repo_state", "diff_scan"}
-    assert "dependency_graph" not in runnable(pack)  # a skill session: a launcher's job
+    assert set(runnable(pack)) == {"feeds_cache", "repo_state"}
+    assert "dependency_graph" not in runnable(pack)  # a model role without a command
+    # a skill session: a runner pool's job — this engine's image has no agent harness
+    assert "diff_scan" not in runnable(pack)
+    assert "diff_scan" in runnable(pack, ["llm"])  # a host that carries the harness
 
 
 def test_a_disabled_asset_is_not_claimable() -> None:
     raw = yaml.safe_load(PACK.read_text())
     raw["assets"]["diff_scan"]["enabled"] = False
-    assert "diff_scan" not in runnable(Pack.model_validate(raw))
+    # the label include does not rescue a disabled asset either
+    assert "diff_scan" not in runnable(Pack.model_validate(raw), ["llm"])
+
+
+def test_an_llm_labeled_order_is_left_for_its_pool(context: Context) -> None:
+    """The claim never leases a skill session's order: the engine image has no agent
+    CLI, so running one would only crash it. The order stays queued for the runner
+    pool whose image carries the harness."""
+    _submit(context, "diff_scan", priority=0, repo=True)
+    commands = Commands()
+    done = Runner(
+        context.services(), Pack.load(PACK), WORKER, timedelta(minutes=5), HOSTS, commands
+    ).claim_once()
+    assert done is None, "the llm-labeled order must not be leased"
+    assert commands.seen == []
+    ops = context.services().ops
+    orders = list(every_item(lambda page: ops.list(OrderFilter(states=OPEN_ORDER_STATES), page)))
+    assert [o.asset for o in orders] == ["diff_scan"] and orders[0].state == OrderState.QUEUED
 
 
 @pytest.mark.parametrize(
@@ -173,6 +201,7 @@ def test_a_routed_order_gets_the_rule_that_routed_it(context: Context, tmp_path:
         timedelta(minutes=5),
         HOSTS,
         commands,
+        labels=["llm"],
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED
@@ -191,6 +220,7 @@ def test_an_order_with_no_rule_cannot_fill_a_rule_token(context: Context, tmp_pa
         timedelta(minutes=5),
         HOSTS,
         commands,
+        labels=["llm"],
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.FAILED
@@ -340,12 +370,13 @@ def test_a_skill_session_with_a_command_runs_with_its_role(
         "--repo",
         "{repo_url}",
     ]
+    raw["assets"]["dependency_graph"]["runner"] = {"labels": ["llm"]}
     pack = Pack.model_validate(raw)
-    assert "dependency_graph" in runnable(pack)
+    assert "dependency_graph" in runnable(pack, ["llm"])
     _submit(context, "dependency_graph", priority=0, repo=True)
     commands = Commands()
     done = Runner(
-        context.services(), pack, WORKER, timedelta(minutes=5), HOSTS, commands
+        context.services(), pack, WORKER, timedelta(minutes=5), HOSTS, commands, labels=["llm"]
     ).claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED
     assert commands.seen == [
@@ -531,6 +562,7 @@ def test_a_repositorys_orders_wait_while_their_holder_runs(context: Context) -> 
         timedelta(minutes=5),
         HOSTS,
         gated,
+        labels=["llm"],
     )
     thread = threading.Thread(target=holder.claim_once)
     thread.start()
@@ -561,34 +593,64 @@ def test_a_pair_still_waiting_for_admission_is_not_taken_over(context: Context) 
     assert context.services().ops.get(planned.id).state == OrderState.PLANNED
 
 
-def test_a_takeover_does_not_recreate_an_order_completed_mid_listing(context: Context) -> None:
-    """An order completed by another runner between the listing and the takeover must not be
-    re-created and re-run: `start` would store a fresh leased order for its pair."""
-    app, other = _repository(context), _repository(context, "example/other")
+def test_a_claim_never_recreates_an_order_another_runner_completed(context: Context) -> None:
+    """The lease is one bounded claim, never a `start`: an order another runner completed
+    cannot be re-created and re-run, whatever happens around this runner's claim. The
+    pre-walk's mid-listing race — a victim completed between the listing and the
+    takeover — is gone with the listing itself."""
+    app = _repository(context)
     held = _order(context, "repo_state", app, priority=0)
-    waiting = _order(context, "diff_scan", app, priority=1)  # the top queued order
-    victim = _order(context, "repo_state", other, priority=2)
+    _order(context, "diff_scan", app, priority=1)  # the top queued order: waits for the holder
+    victim = _order(context, "repo_state", _repository(context, "example/other"), priority=2)
     _hold(context, held, "a")
     services = context.services()
-    real_list = services.ops.list
-    raced = False
+    services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
+    services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
 
-    def list_then_complete(filter: OrderFilter, page: Any) -> Any:
-        out = real_list(filter, page)
-        nonlocal raced
-        if not raced and any(o.id == victim.id for o in out.items):
-            raced = True  # another runner claims and completes it after our listing saw it
-            services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
-            services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
-        return out
+    def no_start(*args: Any, **kw: Any) -> RunOrder:
+        raise AssertionError("the runner leases through claim; start would re-create a pair")
 
-    services.ops.list = list_then_complete  # type: ignore[method-assign]
+    services.ops.start = no_start  # type: ignore[method-assign]
     commands = Commands()
-    done = Runner(
-        services, Pack.load(PACK), WorkerId("b"), timedelta(minutes=5), HOSTS, commands
-    ).claim_once()
-    assert done is None
+    assert _runner(context, commands, worker=WorkerId("b")).claim_once() is None
     assert commands.seen == []
-    remaining = list(every_item(lambda p: real_list(OrderFilter(states=tuple(OrderState)), p)))
-    assert {o.id for o in remaining} == {held.id, waiting.id, victim.id}
     assert services.ops.get(victim.id).state == OrderState.SUCCEEDED
+    assert services.ops.get(held.id).state == OrderState.LEASED
+
+
+def test_the_claim_loop_stops_on_term(tmp_path: Path) -> None:
+    """`--loop` exits cleanly on SIGTERM: the signal sets the stop flag, the idle
+    backoff wakes immediately, and the process answers 0 — not a kill mid-iteration
+    that strands the running order until its lease lapses."""
+    core = _core(tmp_path)
+    common = ["--core", str(core), "--pack", str(PACK)]
+    # An empty queue and a long idle backoff: without the flag the loop would
+    # sit in its backoff for minutes, ignoring the signal.
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "traust_engine.ops.cli", "claim", "--loop", "--idle", "1h", *common],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        # The loop is up once it has answered one empty queue (its first
+        # {"claimed": null}); a reader thread keeps the pipe draining.
+        lines: queue.Queue[str] = queue.Queue()
+
+        def drain() -> None:
+            for line in proc.stdout:
+                lines.put(line)
+
+        threading.Thread(target=drain, daemon=True).start()
+        line = lines.get(timeout=100)
+        assert line.strip().startswith('{"claimed"'), f"unexpected first line: {line!r}"
+        proc.send_signal(signal.SIGTERM)
+        rc = proc.wait(timeout=30)
+        assert rc == 0, f"exit {rc}: {proc.stderr.read()}"
+        # The idle backoff (1h) was interrupted by the signal, not waited
+        # out, and no further claim ran after it.
+        assert lines.empty()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
