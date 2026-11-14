@@ -24,6 +24,14 @@ Command templates can use `{worker}` alongside `{run_id}`, `{repo_url}`, `{role}
 `{rule}`. `{worker}` is the claiming runner's ID, so artifact-only session commands can
 record their audit evidence under the same lease; claim, heartbeat and completion are unchanged.
 
+`claim` leases only the assets the host can run. An asset whose `runner` labels carry
+`llm` is a skill session — a runner pool's unit of work, whose image carries the agent
+harness; the engine image has no agent CLI, so the claim leaves those orders queued for
+their pool (the deployed claim workers' shape). A host that does carry the harness (the
+local rig, an operator workstation with the agent CLI logged in) passes `--label llm` to
+include them. Unlabeled assets stay claimable: the label vocabulary is a proposal, and a
+pack yet to carry it names no executor the claim refuses to be.
+
 ## Migrating from the processing-library API on main
 
 The continuous-ops engine is **not a drop-in replacement** for the processing library

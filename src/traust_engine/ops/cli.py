@@ -11,8 +11,10 @@ import json
 import logging
 import os
 import re
+import signal
 import socket
 import sys
+import threading
 import time
 import traceback
 from collections.abc import Collection, Iterator, Sequence
@@ -243,13 +245,56 @@ def _diff(args: argparse.Namespace, core: Context, pack: Pack) -> int:
 
 def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     worker = WorkerId(args.worker or f"{socket.gethostname()}:{os.getpid()}")
-    runner = Runner(core.services(), pack, worker, args.lease, core.config.forge_hosts)
-    order = runner.claim_once()
-    if order is None:
-        print(json.dumps({"claimed": None}))
-        return 0
-    print(order.model_dump_json())
-    return _EXIT[order.state]
+    runner = Runner(
+        core.services(), pack, worker, args.lease, core.config.forge_hosts, labels=args.label
+    )
+    if not args.loop:
+        order = runner.claim_once()
+        if order is None:
+            print(json.dumps({"claimed": None}))
+            return 0
+        print(order.model_dump_json())
+        return _EXIT[order.state]
+    # The pool's shape: keep claiming while work flows, back off when the queue is
+    # empty. The claim is one bounded SQL statement now (the mirror-affinity pre-walk
+    # is core's own), so the idle cadence is a deployment choice, not a load cliff:
+    # the default backs an empty queue off to once a minute — the read-efficiency
+    # audit's 10s poll on an empty production queue was ~10⁸ row-materializations a
+    # day before the bounding — while a claimed order loops straight back for the
+    # next one. Each pass opens its own correlation scope (the tick loop's own
+    # rule): one request id per claim, never one for the runner's whole life.
+    #
+    # The loop stops on TERM or INT, not by being killed: the signal sets the
+    # flag, the current order runs to its completion (its lease renewed while
+    # it runs — a kill mid-order would strand the order until its lease
+    # lapses), and the runner exits before claiming the next one. The idle
+    # backoff waits on the flag, so a stopped runner leaves its backoff
+    # immediately. (A wrapper's TERM trap still reaps the process; this is
+    # the in-process half of that contract.)
+    stop = threading.Event()
+
+    def _stopping(signum: int, frame: Any) -> None:
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _stopping)
+    signal.signal(signal.SIGINT, _stopping)
+    idled = False
+    while not stop.is_set():
+        with correlation_scope(_request_id("claim"), actor_kind=ActorKind.MACHINE):
+            order = runner.claim_once()
+        if order is None:
+            if not idled:
+                # The queue drained: one answer in the claim-once shape, so a
+                # watcher can tell an idle loop from a wedged one — the
+                # backoff itself stays silent (one line per drain, never one
+                # per tick).
+                print(json.dumps({"claimed": None}), flush=True)
+                idled = True
+            stop.wait(args.idle.total_seconds())
+            continue
+        idled = False
+        print(order.model_dump_json(), flush=True)
+    return 0
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -301,6 +346,30 @@ def _parser() -> argparse.ArgumentParser:
     claim.add_argument("--worker", help="this runner's id (default: host:pid)")
     claim.add_argument(
         "--lease", type=_duration, default="15m", help="lease, renewed while running"
+    )
+    claim.add_argument(
+        "--loop",
+        action="store_true",
+        help="keep claiming instead of exiting: the next order immediately,"
+        " an empty queue after --idle",
+    )
+    claim.add_argument(
+        "--idle",
+        type=_duration,
+        default="1m",
+        help="empty-queue backoff while --loop (the claim is one bounded"
+        " query; the audit's 10s empty poll backed off to 60s)",
+    )
+    claim.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        metavar="RUNNER_LABEL",
+        help=(
+            "also claim assets whose runner labels carry this (default: the llm-labeled"
+            " skill sessions are left for runner pools whose images carry the agent"
+            " harness; pass --label llm on a host that has one)"
+        ),
     )
     return ap
 
@@ -391,7 +460,9 @@ def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
                     engine = stack.enter_context(_loop(core, pack, args.router))
                 else:
                     if args.op == "claim":
-                        core.preflight(pack.assets[name].requires for name in runnable(pack))
+                        core.preflight(
+                            pack.assets[name].requires for name in runnable(pack, args.label)
+                        )
                     engine = None
             except Exception as error:
                 _debug_failure(error)

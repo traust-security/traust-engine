@@ -10,7 +10,7 @@ import logging
 import re
 import subprocess
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import copy_context
 from datetime import timedelta
 from time import perf_counter
@@ -19,14 +19,10 @@ from uuid import UUID
 from pydantic import ValidationError
 from traust_core.v1.context.context import Services
 from traust_core.v1.errors import ConflictError, TraustError
-from traust_core.v1.models.common import every_item
 from traust_core.v1.models.operations import (
-    OPEN_ORDER_STATES,
     AssetName,
     JobResult,
-    OrderFilter,
     OrderReason,
-    OrderState,
     RunOrder,
     WorkerId,
 )
@@ -34,7 +30,7 @@ from traust_core.v1.models.values import HttpsRepoUrl
 
 from traust_engine.ops.completion import complete
 from traust_engine.ops.events import execution_scope, lifecycle
-from traust_engine.ops.pack import AssetSpec, Pack
+from traust_engine.ops.pack import AGENT_LABEL, AssetSpec, Pack
 
 log = logging.getLogger(__name__)
 
@@ -64,10 +60,23 @@ def _by_exit(done: subprocess.CompletedProcess[str]) -> JobResult:
     return JobResult.failed(CRASHED)
 
 
-def runnable(pack: Pack) -> tuple[AssetName, ...]:
-    """The assets this runner makes: enabled, with a command; a model role without one has
-    nothing to start its session with."""
-    return tuple(name for name, spec in pack.assets.items() if spec.enabled and spec.run)
+def runnable(pack: Pack, labels: Collection[str] = ()) -> tuple[AssetName, ...]:
+    """The assets this runner makes: enabled, with a command, and not routed to another
+    executor by its runner labels. An `llm`-labeled asset is a skill session — a runner
+    pool's unit of work (its image carries the agent harness); this engine's image has
+    no agent CLI, so claiming one would only crash it. A host that does carry the
+    harness (the local rig, an operator workstation with the agent CLI logged in)
+    passes the label to include those assets. Unlabeled assets stay claimable: the
+    label vocabulary is a proposal, and a pack yet to carry it names no executor this
+    runner refuses to be."""
+    included = set(labels)
+    return tuple(
+        name
+        for name, spec in pack.assets.items()
+        if spec.enabled
+        and spec.run
+        and (AGENT_LABEL not in spec.runner.labels or AGENT_LABEL in included)
+    )
 
 
 class UnresolvedParam(TraustError):
@@ -97,6 +106,7 @@ class Runner:
         lease_for: timedelta,
         hosts: Sequence[str],
         run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+        labels: Collection[str] = (),
     ) -> None:
         self._services = services
         self._pack = pack
@@ -104,6 +114,7 @@ class Runner:
         self._lease_for = lease_for
         self._hosts = tuple(hosts)
         self._run = run or _run
+        self._labels = tuple(labels)
 
     def claim_once(self) -> RunOrder | None:
         """Run one queued order to completion; None when no eligible order can be leased."""
@@ -200,54 +211,22 @@ class Runner:
         )
 
     def _lease(self) -> RunOrder | None:
-        """Lease the next queued order of an asset this runner makes, most important first. A
-        repository another runner holds — its order is in flight, so its node already fetched
-        the repository's mirror — keeps this runner off that repository's other orders: they
-        wait for the holder, and the runner takes other work instead.
+        """Lease the next queued order of an asset this runner makes, most important first.
 
-        NEED(core: mirror affinity): a hold lasts only while the holder's order is leased —
-        nothing records it between orders — and the claim API filters by asset, not repository,
-        so when the next order waits for its repository's holder this picks a later order here
-        and takes it over through core's `start`."""
-        ops = self._services.ops
-        ops.requeue_expired()  # a claim-once runner runs beside no loop: sweep, as `claim` did
-        assets = set(runnable(self._pack))
-        every_open = list(every_item(lambda p: ops.list(OrderFilter(states=OPEN_ORDER_STATES), p)))
-        open_orders = [order for order in every_open if order.asset in assets]
-        queued = sorted(
-            (o for o in open_orders if o.state == OrderState.QUEUED),
-            key=lambda o: (o.priority, o.created_at, o.id),
-        )
-        if not queued:
-            return None
-        # every open order counts, whatever pack or asset it belongs to: a repository held
-        # by another runner's order is held, not just one this runner could also make
-        held = {
-            o.repository_id
-            for o in every_open
-            if o.state == OrderState.LEASED
-            and o.repository_id is not None
-            and o.lease_holder != self._worker
-        }
-        if queued[0].repository_id not in held:
-            return ops.claim(self._worker, self._lease_for, assets)
-        # only a free pair is taken over: an order at its budget gate (planned) or already
-        # leased keeps its queued sibling waiting, whatever runner holds it.
-        busy = {(o.asset, o.repository_id) for o in open_orders if o.state != OrderState.QUEUED}
-        for order in queued:
-            if order.repository_id not in held and (order.asset, order.repository_id) not in busy:
-                taken = self._take(order)
-                if taken is not None:
-                    return taken
-        return None
-
-    def _take(self, order: RunOrder) -> RunOrder | None:
-        """Lease exactly this queued order; None when another runner leased or completed it
-        first — never re-created, or finished work would run a second time."""
-        assert order.id is not None
-        return self._services.ops.claim(
-            self._worker, self._lease_for, {AssetName(order.asset)}, order_id=order.id
-        )
+        The claim is core's own bounded query (`LIMIT 1 ... FOR UPDATE SKIP LOCKED` over
+        the queue head) carrying the mirror-affinity exclusion: a repository another
+        runner holds — its order is in flight, so its node already fetched the
+        repository's mirror — keeps this runner off that repository's orders whatever
+        asset holds it (they wait for the holder), and a pair an open non-queued order
+        occupies (an order at its budget gate, planned) waits with it, so the runner is
+        handed the first order it can actually take. One SQL statement answers what the
+        pre-walk once read every open order to decide — at production's 7,300 open
+        orders, ~10⁸ row-materializations a day — and the claim sweeps expired leases
+        in the same transaction, so the runner needs no separate sweep. An order
+        another runner completes mid-claim cannot be re-created either: the claim
+        leases a queued row or answers none, never `start`ing a fresh one for a pair."""
+        assets = set(runnable(self._pack, self._labels))
+        return self._services.ops.claim(self._worker, self._lease_for, assets, mirror_affinity=True)
 
     def _values(self, order: RunOrder, spec: AssetSpec) -> dict[str, str]:
         """What the order supplies: its id, the asset's model role, the rule that routed it, and
