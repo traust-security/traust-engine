@@ -182,7 +182,7 @@ class Controller(Generic[S]):
         unrunnable = tuple(
             name for name, spec in self._pack.assets.items() if not spec.run and spec.model is None
         )
-        requests, routed, unrouted, refused_again = self._route(now)
+        requests, routed, unrouted, refused_again = self._route(now, set(repositories))
         planned, stale, stops = 0, {}, []
         for name in self._pack.topo_order():
             spec = self._pack.assets[name]
@@ -248,12 +248,16 @@ class Controller(Generic[S]):
                 overdue[name] = count
         return overdue
 
-    def _route(self, now: datetime) -> tuple[list[OrderRequest], int, int, int]:
+    def _route(
+        self, now: datetime, active: Collection[UUID]
+    ) -> tuple[list[OrderRequest], int, int, int]:
         """Re-route repositories whose `route_on` asset materialized, whose routed order was
         refused, or that a recorded release ships, since the last tick; each route with a lane
         the pack runs becomes an order for that lane's asset, except a route back into a lane
         that refused it. A lane the pack runs no asset for is a pack error: the pass fails
-        before it plans anything."""
+        before it plans anything. A repository outside `active` — one carrying the
+        unreachable disposition — is left unrouted: it left the planner's universe, so no
+        feed-derived change re-enters it (Qodo #169)."""
         source = self._pack.route_on
         if self._router is None or self._state_of is None or source is None:
             return [], 0, 0, 0
@@ -268,6 +272,9 @@ class Controller(Generic[S]):
             unknown: set[LaneName] = set()
             routed = unrouted = refused_again = 0
             for repository_id in changed | refusals.keys() | releases.keys():
+                if repository_id not in active:
+                    unrouted += 1
+                    continue
                 try:
                     state = self._state_of(repository_id)
                 except NotFoundError:
@@ -350,7 +357,7 @@ class Controller(Generic[S]):
         return subject if self._pack.assets[dep].partitions else None
 
     def remediation_due(
-        self, cursor: Cursor | None, *, wake: bool = True
+        self, cursor: Cursor | None, *, wake: bool = True, active: Collection[UUID] | None = None
     ) -> tuple[list[OrderRequest], Cursor | None]:
         """Remediation-driven work: verification orders for implemented remediations,
         reattempts for failed ones. Reads the feed for remediation assessments and finished
@@ -422,10 +429,12 @@ class Controller(Generic[S]):
             if page.next is None:
                 break
         for repository_id in recheck:
-            self._recheck(repository_id, requests, planned, busy, demanded, wake)
+            if active is None or repository_id in active:
+                self._recheck(repository_id, requests, planned, busy, demanded, wake)
         if fleet_wide:
             for repository_id in self._repositories():
-                self._recheck(repository_id, requests, planned, busy, demanded, wake)
+                if active is None or repository_id in active:
+                    self._recheck(repository_id, requests, planned, busy, demanded, wake)
         # A woken deferral survives its pass unless the pass proves the demand
         # satisfied: a repository the pass dispatched for keeps its wake (a
         # planning failure after this return then finds it intact next pass —
@@ -436,6 +445,15 @@ class Controller(Generic[S]):
         for repository_id, ready_at in woken.items():
             if repository_id in demanded and repository_id not in self._deferred:
                 self._deferred[repository_id] = ready_at
+        if active is not None:
+            # The universe rule, applied to every lane: a repository carrying the
+            # unreachable disposition is dispatched nothing, whatever the feed says.
+            live = set(active)
+            requests = [
+                request
+                for request in requests
+                if request.repository_id is None or request.repository_id in live
+            ]
         return requests, cursor
 
     def _assessment_request(
@@ -677,12 +695,16 @@ class Controller(Generic[S]):
         return repository.id
 
     def _repositories(self) -> list[UUID]:
-        """Every registered repository: what a fleet-wide run's closing re-reads."""
+        """Every active repository: what a fleet-wide run's closing re-reads. The
+        unreachable disposition leaves the planner's universe, so a fleet-wide recheck
+        skips those repositories like every other lane does."""
         assert self._portfolio is not None
         return [
             repository.id
             for repository in every_item(
-                lambda page: self._portfolio.list_repositories(RepositoryFilter(), page)
+                lambda page: self._portfolio.list_repositories(
+                    RepositoryFilter(dispositioned=False), page
+                )
             )
             if repository.id is not None
         ]

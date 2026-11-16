@@ -34,7 +34,6 @@ sources:
     probe:
       ident: lodash
       ecosystem: npm
-      expect_status: 200
     license:
       id: pass-through
       url: https://osv.dev/
@@ -46,7 +45,6 @@ sources:
     ident: cve
     probe:
       ident: CVE-2021-44228
-      expect_status: 200
     license:
       id: public-domain-with-attribution-request
       url: https://nvd.nist.gov/developers/terms-of-use

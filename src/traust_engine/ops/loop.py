@@ -67,7 +67,9 @@ class EngineLoop(Generic[S]):
         requeued = self._services.ops.requeue_expired()
         hosts = self._hosts()
         tick = self._controller.tick(hosts.keys())
-        due, cursor = self._controller.remediation_due(self._remediation_cursor)
+        due, cursor = self._controller.remediation_due(
+            self._remediation_cursor, active=hosts.keys()
+        )
         for request in due:
             self._services.ops.plan(request, ENGINE, self._pack.config())
         # The cursor advances only once every request is planned: a planning failure
@@ -88,7 +90,9 @@ class EngineLoop(Generic[S]):
         # The remediation scan reads from the live cursor and discards its resume
         # point, and wakes no deferred demand: the shadow previews what the next
         # live pass would plan without consuming anything it alone could recover.
-        remediation, _ = self._controller.remediation_due(self._remediation_cursor, wake=False)
+        remediation, _ = self._controller.remediation_due(
+            self._remediation_cursor, wake=False, active=self._hosts().keys()
+        )
         return ShadowReport(tick=tick, due=tuple(due), remediation=tuple(remediation))
 
     def _hosts(self) -> dict[UUID, str]:
