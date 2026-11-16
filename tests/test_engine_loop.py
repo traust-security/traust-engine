@@ -19,9 +19,11 @@ from traust_core.v1.errors import ConfigError, NotFoundError, TraustError
 from traust_core.v1.models.artifacts import RunManifestArtifact
 from traust_core.v1.models.common import PageRequest, every_item
 from traust_core.v1.models.inventory import (
+    GoneReason,
     ProductSlug,
     RecordedRelease,
     ReleaseCommit,
+    RepositoryDisposition,
     VersionLabel,
 )
 from traust_core.v1.models.operations import (
@@ -36,6 +38,7 @@ from traust_core.v1.models.operations import (
     WorkerId,
 )
 from traust_core.v1.models.values import GitSha, HttpsRepoUrl
+from traust_core.v1.repositories.contract import SqlTraustUnitOfWork
 from traust_core.v1.services.artifact_publishing import PublishSpec, PublishSpecs
 
 from traust_engine.ops.controller import ENGINE, Controller
@@ -909,3 +912,41 @@ def test_pending_order_is_not_admitted_after_asset_is_disabled(tmp_path: Path) -
     assert report.admission.withheld == 1
     assert withheld.state == OrderState.WITHHELD
     assert withheld.reason == "asset-not-in-pack"
+
+
+def test_a_dispositioned_repository_leaves_the_planners_universe(tmp_path: Path) -> None:
+    """The planner's universe (foundry plan repo-unreachable): a repository carrying the
+    unreachable disposition left it - the tick plans no asset for it and the router
+    never sees it, so a dead registration costs no roundtrip per walk. Only a person's
+    verify (core's door) returns it."""
+    clock = Clock()
+    context = _context(tmp_path, clock)
+    services = context.services()
+    live = _repositories(services, 2)
+    dead = services.portfolio.register_repository(
+        HttpsRepoUrl.parse("https://github.com/example/gone", ["github.com"]), public=True
+    )
+    assert dead.id is not None
+    with SqlTraustUnitOfWork(context.database) as uow:
+        row = uow.repositories.get(dead.id)
+        uow.repositories.update(
+            row.model_copy(
+                update={
+                    "disposition": RepositoryDisposition.REPO_UNREACHABLE,
+                    "disposition_reason": GoneReason.GONE,
+                }
+            )
+        )
+        uow.commit()
+    router = LaneRouter()
+    report = EngineLoop(services, clock, Pack.load(PACK), router, state_of=lambda r: r).run_once()
+
+    assert dead.id not in router.seen
+    assert set(router.seen) <= set(live)
+    subjects = {
+        o.repository_id
+        for o in _orders(services, OrderState.QUEUED, OrderState.PLANNED)
+        if o.repository_id is not None
+    }
+    assert dead.id not in subjects
+    assert report.tick.planned == 3  # feeds_cache + repo_state x2: the dead one is gone
