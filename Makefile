@@ -1,6 +1,6 @@
 PYTHON ?= python3
 
-.PHONY: help setup sync hooks lint lint-fix test gitleaks
+.PHONY: help setup sync hooks lint lint-fix test perf gitleaks
 
 help:
 	@echo "Targets ($(notdir $(CURDIR))):"
@@ -10,6 +10,7 @@ help:
 	@echo "  make lint           — ruff check + format --check"
 	@echo "  make lint-fix       - ruff --fix"
 	@echo "  make test           — pytest unit tests, excludes integration (parallel via pytest-xdist)"
+	@echo "  make perf           — the planning pass at fleet volume on Postgres (db-up in traust-core)"
 	@echo "  make gitleaks        — fetch the pinned gitleaks binary for this arch (image build input)"
 
 setup: sync hooks
@@ -32,6 +33,9 @@ lint-fix:
 
 test:
 	uv run pytest tests/ -q -n auto -m "not integration"
+
+perf:
+	uv run pytest perf/ -q
 
 # The container build's gitleaks input (Containerfile COPY gitleaks): the upstream
 # v8.30.1 release artifact for the BUILD MACHINE's architecture, digest-verified —
