@@ -75,7 +75,9 @@ class Commands:
         self.stdout, self.code, self.delay = stdout, code, delay
         self.seen: list[list[str]] = []
 
-    def __call__(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, command: list[str], started_at: datetime | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.seen.append(command)
         time.sleep(self.delay)
         return subprocess.CompletedProcess(command, self.code, self.stdout, "")
@@ -354,6 +356,28 @@ def test_a_real_command_is_run_without_a_shell(context: Context) -> None:
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.DEGRADED
+
+
+def test_command_receives_its_original_lease_start_not_an_ambient_stamp(
+    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRAUST_ORDER_STARTED_AT", "stale")
+    _submit(context, "feeds_cache")
+    stamp = tmp_path / "observed"
+    pack = yaml.safe_load(PACK.read_text())
+    pack["assets"]["feeds_cache"]["run"] = [
+        sys.executable,
+        "-c",
+        "import os, sys; from pathlib import Path; "
+        "Path(sys.argv[1]).write_text(os.environ['TRAUST_ORDER_STARTED_AT'])",
+        str(stamp),
+    ]
+    runner = Runner(
+        context.services(), Pack.model_validate(pack), WORKER, timedelta(minutes=5), HOSTS
+    )
+    done = runner.claim_once()
+    assert done is not None and done.state == OrderState.SUCCEEDED and done.started_at is not None
+    assert datetime.fromisoformat(stamp.read_text()) == done.started_at
 
 
 FEEDS = Path(__file__).parent / "fixtures" / "config" / "feeds.yaml"

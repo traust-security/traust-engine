@@ -23,6 +23,9 @@ The engine imports only traust-core's public API: `traust_core.v1.context`, `mod
 Command templates can use `{worker}` alongside `{run_id}`, `{repo_url}`, `{role}` and
 `{rule}`. `{worker}` is the claiming runner's ID, so artifact-only session commands can
 record their audit evidence under the same lease; claim, heartbeat and completion are unchanged.
+Each claim subprocess receives `TRAUST_ORDER_STARTED_AT` from the original lease.
+Use this timestamp for order-bound recording provenance: looking up the order after
+producing a report could return the start of a different attempt by the same worker.
 
 `claim` leases only the assets the host can run. An asset whose `runner` labels carry
 `llm` is a skill session — a runner pool's unit of work, whose image carries the agent

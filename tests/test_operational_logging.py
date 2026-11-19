@@ -95,7 +95,7 @@ def test_cli_uses_core_outputs_and_scopes_claimed_execution_without_leaks(
     )
     assert queued.id is not None
 
-    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], started_at: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 9, SECRET, SECRET)
 
     monkeypatch.setattr("traust_engine.ops.runner._run", run)
@@ -244,7 +244,7 @@ def test_completion_rejection_emits_one_bounded_execution_failure(
     )
     answer = JobResult.partly({SECRET: 1}).model_dump_json()
 
-    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], started_at: object) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 4, answer, "")
 
     monkeypatch.setattr("traust_engine.ops.runner._run", run)

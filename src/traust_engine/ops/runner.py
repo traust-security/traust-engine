@@ -7,12 +7,13 @@ fetched once per node."""
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import copy_context
-from datetime import timedelta
+from datetime import datetime, timedelta
 from time import perf_counter
 from uuid import UUID
 
@@ -113,7 +114,7 @@ class Runner:
         self._worker = worker
         self._lease_for = lease_for
         self._hosts = tuple(hosts)
-        self._run = run or _run
+        self._run = run
         self._labels = tuple(labels)
 
     def claim_once(self) -> RunOrder | None:
@@ -163,7 +164,8 @@ class Runner:
         returncode = None
         error_type = None
         try:
-            done = self._run(command)
+            assert order.started_at is not None
+            done = self._run(command) if self._run else _run(command, order.started_at)
             returncode = done.returncode
             result = outcome(done)
         except OSError as error:
@@ -270,5 +272,11 @@ class Runner:
                 )
 
 
-def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+def _run(command: list[str], started_at: datetime) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        env={**os.environ, "TRAUST_ORDER_STARTED_AT": started_at.isoformat()},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
