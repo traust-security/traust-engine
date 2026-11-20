@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from uuid import UUID
 
 from traust_core.v1.context import OpsService
 from traust_core.v1.models.operations import JobResult, OrderState, RunOrder, WorkerId
@@ -14,7 +13,7 @@ from traust_engine.ops.events import lifecycle
 def complete(
     ops: OpsService,
     logger: logging.Logger,
-    order_id: UUID,
+    order: RunOrder,
     worker: WorkerId,
     result: JobResult,
     started: float,
@@ -23,8 +22,9 @@ def complete(
     error_type: str | None = None,
 ) -> RunOrder:
     """Complete once, preserving the caller's logger, correlation and exception behavior."""
+    assert order.id is not None
     try:
-        completed = ops.complete(order_id, worker, result)
+        completed = ops.complete(order.id, worker, result, lease_generation=order.lease_generation)
     except Exception as error:
         lifecycle(
             logger,

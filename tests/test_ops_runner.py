@@ -24,6 +24,7 @@ from uuid import UUID
 import pytest
 import yaml
 from traust_core.v1.context import Config, Context
+from traust_core.v1.errors import ConflictError
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.inventory import RefName
@@ -75,9 +76,7 @@ class Commands:
         self.stdout, self.code, self.delay = stdout, code, delay
         self.seen: list[list[str]] = []
 
-    def __call__(
-        self, command: list[str], started_at: datetime | None = None
-    ) -> subprocess.CompletedProcess[str]:
+    def __call__(self, command: list[str]) -> subprocess.CompletedProcess[str]:
         self.seen.append(command)
         time.sleep(self.delay)
         return subprocess.CompletedProcess(command, self.code, self.stdout, "")
@@ -292,9 +291,9 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     services = context.services()
     real = services.ops.heartbeat
 
-    def heartbeat(*args: Any) -> RunOrder:
-        beats.append(args)
-        return real(*args)
+    def heartbeat(*args: Any, lease_generation: int) -> RunOrder:
+        beats.append((*args, lease_generation))
+        return real(*args, lease_generation=lease_generation)
 
     services.ops.heartbeat = heartbeat  # type: ignore[method-assign]
     runner = Runner(
@@ -302,7 +301,9 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
-    assert beats and all(b[0] == queued.id and b[1] == WORKER for b in beats)
+    assert beats and all(
+        (b[0], b[1], b[3]) == (queued.id, WORKER, done.lease_generation) for b in beats
+    )
 
 
 def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
@@ -313,11 +314,11 @@ def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
     services = context.services()
     real = services.ops.heartbeat
 
-    def flaky(*args: Any) -> RunOrder:
+    def flaky(*args: Any, lease_generation: int) -> RunOrder:
         beats.append(args)
         if len(beats) == 1:
             raise sqlite3.OperationalError("database is locked")
-        return real(*args)
+        return real(*args, lease_generation=lease_generation)
 
     services.ops.heartbeat = flaky  # type: ignore[method-assign]
     runner = Runner(
@@ -358,26 +359,56 @@ def test_a_real_command_is_run_without_a_shell(context: Context) -> None:
     assert done is not None and done.state == OrderState.DEGRADED
 
 
-def test_command_receives_its_original_lease_start_not_an_ambient_stamp(
-    context: Context, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("TRAUST_ORDER_STARTED_AT", "stale")
-    _submit(context, "feeds_cache")
-    stamp = tmp_path / "observed"
+def test_old_command_cannot_complete_a_same_worker_reclaim(tmp_path: Path) -> None:
+    class Clock:
+        at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        def now(self) -> datetime:
+            return self.at
+
+    clock = Clock()
+    context = Context(Config(home=tmp_path), clock=clock)
+    order = _submit(context, "feeds_cache")
+    ops = context.services().ops
+    lease = timedelta(minutes=5)
+
+    def reclaim_while_running(command: list[str]) -> subprocess.CompletedProcess[str]:
+        clock.at += 2 * lease
+        replacement = ops.claim(WORKER, lease, order_id=order.id)
+        assert replacement is not None and replacement.id == order.id
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    runner = Runner(
+        context.services(), Pack.load(PACK), WORKER, lease, HOSTS, reclaim_while_running
+    )
+    with pytest.raises(ConflictError):
+        runner.claim_once()
+    assert order.id is not None
+    current = ops.get(order.id)
+    assert current.state == OrderState.LEASED and current.lease_generation == 2
+
+
+def test_reclaimed_order_command_receives_its_generation(context: Context, tmp_path: Path) -> None:
+    queued = _submit(context, "feeds_cache")
+    first = context.services().ops.claim(WORKER, timedelta(seconds=0), order_id=queued.id)
+    assert first is not None
+    receipt = tmp_path / "claim"
     pack = yaml.safe_load(PACK.read_text())
     pack["assets"]["feeds_cache"]["run"] = [
         sys.executable,
         "-c",
-        "import os, sys; from pathlib import Path; "
-        "Path(sys.argv[1]).write_text(os.environ['TRAUST_ORDER_STARTED_AT'])",
-        str(stamp),
+        "import sys; from pathlib import Path; Path(sys.argv[1]).write_text(' '.join(sys.argv[2:]))",
+        str(receipt),
+        "{run_id}",
+        "{lease_generation}",
     ]
     runner = Runner(
         context.services(), Pack.model_validate(pack), WORKER, timedelta(minutes=5), HOSTS
     )
     done = runner.claim_once()
-    assert done is not None and done.state == OrderState.SUCCEEDED and done.started_at is not None
-    assert datetime.fromisoformat(stamp.read_text()) == done.started_at
+    assert done is not None and done.state == OrderState.SUCCEEDED and done.id == first.id
+    assert done.lease_generation == first.lease_generation + 1
+    assert receipt.read_text() == f"{first.id} {done.lease_generation}"
 
 
 FEEDS = Path(__file__).parent / "fixtures" / "config" / "feeds.yaml"
@@ -484,9 +515,9 @@ def _order(context: Context, asset: str, repository_id: UUID, priority: int) -> 
 
 def _hold(
     context: Context, order: RunOrder, worker: str, lease_for: timedelta = timedelta(minutes=5)
-) -> None:
+) -> RunOrder:
     """Lease `order` to `worker` without running it, as a runner mid-command would have."""
-    context.services().ops.start(
+    return context.services().ops.start(
         OrderRequest(asset=order.asset, priority=order.priority, repository_id=order.repository_id),
         OPERATOR,
         WorkerId(worker),
@@ -557,11 +588,14 @@ def test_freeing_the_hold_lets_other_runners_claim(
     app = _repository(context)
     held = _order(context, "repo_state", app, priority=0)
     _order(context, "diff_scan", app, priority=1)
-    _hold(
+    held = _hold(
         context, held, "a", timedelta(minutes=5) if free == "complete" else timedelta(seconds=0.1)
     )
     if free == "complete":
-        context.services().ops.complete(held.id, WorkerId("a"), JobResult.succeeded())
+        assert held.id is not None
+        context.services().ops.complete(
+            held.id, WorkerId("a"), JobResult.succeeded(), lease_generation=held.lease_generation
+        )
     else:
         time.sleep(0.3)  # the lease lapses; the claim sweep requeues it
     done = _runner(context, Commands(), worker=WorkerId("b")).claim_once()
@@ -628,8 +662,11 @@ def test_a_claim_never_recreates_an_order_another_runner_completed(context: Cont
     victim = _order(context, "repo_state", _repository(context, "example/other"), priority=2)
     _hold(context, held, "a")
     services = context.services()
-    services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
-    services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
+    claim = services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
+    assert claim is not None and claim.id is not None
+    services.ops.complete(
+        claim.id, WorkerId("a"), JobResult.succeeded(), lease_generation=claim.lease_generation
+    )
 
     def no_start(*args: Any, **kw: Any) -> RunOrder:
         raise AssertionError("the runner leases through claim; start would re-create a pair")

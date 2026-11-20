@@ -7,13 +7,12 @@ fetched once per node."""
 from __future__ import annotations
 
 import logging
-import os
 import re
 import subprocess
 import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
 from contextvars import copy_context
-from datetime import datetime, timedelta
+from datetime import timedelta
 from time import perf_counter
 from uuid import UUID
 
@@ -114,7 +113,7 @@ class Runner:
         self._worker = worker
         self._lease_for = lease_for
         self._hosts = tuple(hosts)
-        self._run = run
+        self._run = run or _run
         self._labels = tuple(labels)
 
     def claim_once(self) -> RunOrder | None:
@@ -133,12 +132,12 @@ class Runner:
         lifecycle(log, "lease", "claimed", started=started, level=logging.INFO, count=1)
         spec = self._pack.assets.get(AssetName(order.asset))
         if spec is None:
-            return self._finish(order.id, JobResult.failed(NOT_IN_PACK), started)
+            return self._finish(order, JobResult.failed(NOT_IN_PACK), started)
         try:
             command = argv(spec, self._values(order, spec))
         except (UnresolvedParam, ValueError, TraustError) as error:
             return self._finish(
-                order.id,
+                order,
                 JobResult.failed(BAD_REQUEST),
                 started,
                 error_type=type(error).__name__,
@@ -157,15 +156,14 @@ class Runner:
         context = copy_context()
         beat = threading.Thread(
             target=context.run,
-            args=(self._heartbeat, order.id, stop),
+            args=(self._heartbeat, order.id, order.lease_generation, stop),
             daemon=True,
         )
         beat.start()
         returncode = None
         error_type = None
         try:
-            assert order.started_at is not None
-            done = self._run(command) if self._run else _run(command, order.started_at)
+            done = self._run(command)
             returncode = done.returncode
             result = outcome(done)
         except OSError as error:
@@ -185,7 +183,7 @@ class Runner:
             stop.set()
             beat.join()
         return self._finish(
-            order.id,
+            order,
             result,
             started,
             returncode=returncode,
@@ -194,7 +192,7 @@ class Runner:
 
     def _finish(
         self,
-        order_id: UUID,
+        order: RunOrder,
         result: JobResult,
         started: float,
         *,
@@ -204,7 +202,7 @@ class Runner:
         return complete(
             self._services.ops,
             log,
-            order_id,
+            order,
             self._worker,
             result,
             started,
@@ -234,7 +232,11 @@ class Runner:
         """What the order supplies: its id, the asset's model role, the rule that routed it, and
         its repository's URL for a per-repository asset. NEED(model: order params): typed params
         beyond the repository have no column yet."""
-        values = {"run_id": str(order.id), "worker": str(self._worker)}
+        values = {
+            "run_id": str(order.id),
+            "lease_generation": str(order.lease_generation),
+            "worker": str(self._worker),
+        }
         if spec.model is not None:
             values["role"] = spec.model.role
         if order.rule is not None:
@@ -244,11 +246,13 @@ class Runner:
             values["repo_url"] = str(HttpsRepoUrl.parse(url, self._hosts))
         return values
 
-    def _heartbeat(self, order_id: UUID, stop: threading.Event) -> None:
+    def _heartbeat(self, order_id: UUID, lease_generation: int, stop: threading.Event) -> None:
         while not stop.wait(self._lease_for.total_seconds() / 3):
             started = perf_counter()
             try:
-                self._services.ops.heartbeat(order_id, self._worker, self._lease_for)
+                self._services.ops.heartbeat(
+                    order_id, self._worker, self._lease_for, lease_generation=lease_generation
+                )
             except ConflictError as error:
                 lifecycle(
                     log,
@@ -272,11 +276,5 @@ class Runner:
                 )
 
 
-def _run(command: list[str], started_at: datetime) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        command,
-        env={**os.environ, "TRAUST_ORDER_STARTED_AT": started_at.isoformat()},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, check=False)

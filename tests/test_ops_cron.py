@@ -89,7 +89,9 @@ def test_a_cron_asset_is_due_at_each_fire_unless_attempted_since(tmp_path: Path)
     loop.run_once()
     order = services.ops.claim(WorkerId("w"), timedelta(minutes=5), ["feeds_cache"])
     assert order is not None and order.id is not None
-    services.ops.complete(order.id, WorkerId("w"), JobResult.succeeded())
+    services.ops.complete(
+        order.id, WorkerId("w"), JobResult.succeeded(), lease_generation=order.lease_generation
+    )
     clock.at += timedelta(days=6)
     assert feeds_planned() == 0  # attempted after Monday's fire, next is still to come
     clock.at += timedelta(days=1)
