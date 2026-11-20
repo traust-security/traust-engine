@@ -106,7 +106,7 @@ def record(
             complete(
                 services.ops,
                 log,
-                order.id,
+                order,
                 worker,
                 JobResult.failed(CRASHED),
                 started,
@@ -127,7 +127,7 @@ def record(
         completed = complete(
             services.ops,
             log,
-            order.id,
+            order,
             worker,
             result,
             started,

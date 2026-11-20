@@ -384,7 +384,9 @@ def test_diff_ignores_remediation_runs_as_event_driven_work(core: Path, tmp_path
     queued = ops.admit(queued.id)
     claimed = ops.claim(worker, timedelta(minutes=5), (AssetName("verify_remediation"),))
     assert claimed is not None and claimed.id == queued.id
-    ops.complete(queued.id, worker, JobResult.succeeded())
+    ops.complete(
+        queued.id, worker, JobResult.succeeded(), lease_generation=claimed.lease_generation
+    )
 
     # A shadow pass with nothing cadence-due: the finished remediation run is
     # event-driven work the due lists never asked for — before the filter it

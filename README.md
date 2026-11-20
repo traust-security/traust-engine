@@ -20,9 +20,11 @@ to `~/.traust`); inline `locations:` are resolved relative to `core.yaml` by tra
 The engine imports only traust-core's public API: `traust_core.v1.context`, `models` and
 `errors` (the consumer ratchet in CI holds it there).
 
-Command templates can use `{worker}` alongside `{run_id}`, `{repo_url}`, `{role}` and
-`{rule}`. `{worker}` is the claiming runner's ID, so artifact-only session commands can
-record their audit evidence under the same lease; claim, heartbeat and completion are unchanged.
+Command templates can use `{run_id}`, `{lease_generation}`, `{worker}`, `{repo_url}`,
+`{role}` and `{rule}`. Commands that record against an order take both its stable ID and
+the generation returned by the original database claim. Core rejects writes, heartbeats,
+and completions from an earlier generation, even if the same worker reclaimed the order.
+Do not look up a new generation when submitting the result of old work.
 
 `claim` leases only the assets the host can run. An asset whose `runner` labels carry
 `llm` is a skill session — a runner pool's unit of work, whose image carries the agent

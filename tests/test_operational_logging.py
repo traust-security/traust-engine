@@ -151,7 +151,7 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
     assert queued.id is not None
     seen = []
 
-    def heartbeat(*_: object) -> None:
+    def heartbeat(*_: object, lease_generation: int) -> None:
         seen.append(current_correlation())
         raise ConflictError(SECRET)
 
@@ -169,11 +169,10 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
         run=slow,
     )
     with correlation_scope("heartbeat-request", actor_kind=ActorKind.MACHINE):
-        completed = runner.claim_once()
+        with pytest.raises(ConflictError, match="expired"):
+            runner.claim_once()
         restored = current_correlation()
         assert restored is not None and restored.order_id is None and restored.run_id is None
-        assert runner.claim_once() is None
-    assert completed is not None
     assert seen and seen[0] is not None
     assert (seen[0].request_id, seen[0].order_id, seen[0].run_id) == (
         "heartbeat-request",
@@ -185,7 +184,6 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
     leases = [row for row in rows if row["operation"] == "engine.lease"]
     assert [(row["outcome"], row["order_id"]) for row in leases] == [
         ("claimed", str(queued.id)),
-        ("empty", None),
     ]
     heartbeats = [row for row in rows if row["operation"] == "engine.heartbeat"]
     assert len(heartbeats) == 1
