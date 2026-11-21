@@ -16,7 +16,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -31,7 +31,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -46,7 +46,7 @@ jobs:
     env:
       RATCHET: traust-core @ git+https://github.com/traust-security/traust-core@cb9bf23fb8fe385c89224276c1ee6700d71e6e37
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
