@@ -302,6 +302,42 @@ def test_an_implemented_remediation_plans_a_verification_order(
     ]
 
 
+def test_the_trigger_dispatches_only_the_assets_the_engine_was_given(
+    tmp_path: Path,
+) -> None:
+    """`run --asset` narrows the remediation lanes with the cadence ones: an effort whose
+    asset this engine was not given is left for the engine that was, its demand neither
+    dispatched nor deferred here."""
+    clock = Clock()
+    context = _context(tmp_path, clock)
+    services = context.services()
+    repository, ref = _repository(services)
+    assessment = _assessment(context, T0, repository_ref_id=ref, run_order_id=uuid4())
+    state = _state(repository, RemediationStatus.PATCHED, work_item_id=assessment.id)
+    feed = FakeFeed([FeedEvent(assessment=assessment)])
+
+    def controller(assets: tuple[str, ...]) -> Controller[Any]:
+        return Controller(
+            _pack(tmp_path),
+            services.ops,
+            clock,
+            feed=feed,
+            portfolio=services.portfolio,
+            remediations=FakeScheduling(state),
+            assets=assets,
+        )
+
+    assert _dispatched(controller(("verify_remediation",))) == [
+        (
+            "verify_remediation",
+            repository,
+            f"verify-remediation:{state.work_item_id}",
+            state.work_item_id,
+        )
+    ]
+    assert _dispatched(controller(("remediate_finding",))) == []
+
+
 def test_a_still_vulnerable_remediation_below_the_limit_is_reattempted(
     tmp_path: Path,
 ) -> None:

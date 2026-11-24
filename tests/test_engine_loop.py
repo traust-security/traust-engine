@@ -570,6 +570,62 @@ def test_a_disabled_asset_is_not_planned_or_reported(tmp_path: Path) -> None:
     assert _by_asset(_orders(services, OrderState.PLANNED)) == {"feeds_cache": 1}
 
 
+def test_a_tick_given_assets_plans_only_those(tmp_path: Path) -> None:
+    """`run --asset`: the tick plans the named assets only — a deployment splitting the
+    work by asset, or the SDK's e2e running the shipped pack for the few assets it
+    needs. The rest are left untouched for the engine that was given them."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 2)
+    report = EngineLoop(services, clock, Pack.load(PACK), assets=("repo_state",)).run_once()
+    assert report.tick.planned == 2  # repo_state x2; feeds_cache and dependency_graph not given
+    assert report.tick.stale == {}  # dependency_graph is another engine's, not this one's report
+    assert _by_asset(_orders(services, OrderState.QUEUED, OrderState.PLANNED)) == {"repo_state": 2}
+    assert report.admission.admitted == 2
+
+
+def test_admission_leaves_another_engines_planned_orders_untouched(tmp_path: Path) -> None:
+    """Admission admits only the given assets' orders: another engine's planned order
+    waits as it was left — neither withheld, deferred nor approved by this pass."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    (repo,) = _repositories(services, 1)
+    left = services.ops.plan(
+        OrderRequest(asset="diff_scan", priority=1, repository_id=repo, lane="diff-scan"), ENGINE
+    )
+    assert left.id is not None
+    report = EngineLoop(services, clock, Pack.load(PACK), assets=("feeds_cache",)).run_once()
+    assert report.admission.admitted == 1  # this pass's own feeds_cache order alone
+    untouched = services.ops.get(left.id)
+    assert untouched.state == OrderState.PLANNED and untouched.reason is None
+
+
+def test_a_route_to_a_lane_this_tick_was_not_given_plans_nothing(tmp_path: Path) -> None:
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 1)
+    loop = EngineLoop(
+        services, clock, Pack.load(PACK), LaneRouter(), state_of=lambda r: r, assets=("repo_state",)
+    )
+    loop.run_once()
+    clock.at += timedelta(minutes=10)
+    _drain(services)
+    report = loop.run_once()
+    assert report.tick.routed == 1  # the repository routed; its lane's asset was not given
+    assert _routed_orders(services) == []
+
+
+def test_a_given_tick_reports_only_its_own_assets_health(tmp_path: Path) -> None:
+    """Overdue is the deployment's failure to keep an asset fresh; an asset this engine
+    was not given is another engine's to keep fresh, like a disabled one is."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 2)
+    pack = _pack(tmp_path, repo_state={"freshness": {"fail": "72h"}, "admission": {}})
+    report = EngineLoop(services, clock, pack, assets=("feeds_cache",)).run_once()
+    assert report.tick.overdue == {}
+
+
 def test_the_run_manifest_names_the_toolchain_pins_next_to_the_pack(tmp_path: Path) -> None:
     pins = tmp_path / "external-tools.yaml"
     pins.write_text("tools: {grype: {version: 0.104.0}}\n")

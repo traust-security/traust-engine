@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -51,12 +51,23 @@ class TokenBucket:
 
 
 class Admission:
-    def __init__(self, pack: Pack, ops: OpsService, spend: SpendService, clock: Clock) -> None:
+    def __init__(
+        self,
+        pack: Pack,
+        ops: OpsService,
+        spend: SpendService,
+        clock: Clock,
+        assets: Collection[AssetName] | None = None,
+    ) -> None:
         self._pack = pack
         self._ops = ops
         self._spend = spend
         self._clock = clock
         self._buckets: dict[str, TokenBucket] = {}
+        # None: every planned order is this engine's to admit. A set (`run --asset`):
+        # the pass was narrowed to those assets, and another engine's planned orders
+        # wait untouched — neither withheld nor deferred, exactly as they were left.
+        self._assets = None if assets is None else frozenset(assets)
 
     def admit(self, hosts: Mapping[UUID, str]) -> AdmissionReport:
         """Admit, hold for approval, withhold (budget) or defer (pacing, quota) each planned
@@ -69,6 +80,9 @@ class Admission:
         report = Counter[str]()
         for order in sorted(planned, key=lambda o: (o.priority, o.created_at)):
             asset = AssetName(order.asset)
+            if self._assets is not None and asset not in self._assets:
+                # another engine's planned order: left untouched for its own admission
+                continue
             spec = self._pack.assets.get(asset)
             if spec is None or not spec.enabled:
                 self._ops.withhold(order.id, OrderReason.ASSET_NOT_IN_PACK)

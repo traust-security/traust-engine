@@ -60,7 +60,9 @@ def _by_exit(done: subprocess.CompletedProcess[str]) -> JobResult:
     return JobResult.failed(CRASHED)
 
 
-def runnable(pack: Pack, labels: Collection[str] = ()) -> tuple[AssetName, ...]:
+def runnable(
+    pack: Pack, labels: Collection[str] = (), assets: Collection[AssetName] | None = None
+) -> tuple[AssetName, ...]:
     """The assets this runner makes: enabled, with a command, and not routed to another
     executor by its runner labels. An `llm`-labeled asset is a skill session — a runner
     pool's unit of work (its image carries the agent harness); this engine's image has
@@ -68,14 +70,18 @@ def runnable(pack: Pack, labels: Collection[str] = ()) -> tuple[AssetName, ...]:
     harness (the local rig, an operator workstation with the agent CLI logged in)
     passes the label to include those assets. Unlabeled assets stay claimable: the
     label vocabulary is a proposal, and a pack yet to carry it names no executor this
-    runner refuses to be."""
+    runner refuses to be. `assets` names the only ones to make — a worker pool split
+    by asset (`claim --asset`); None makes every asset the labels allow, and the two
+    compose: a named `llm` asset still needs its label to be claimable."""
     included = set(labels)
+    chosen = None if assets is None else set(assets)
     return tuple(
         name
         for name, spec in pack.assets.items()
         if spec.enabled
         and spec.run
         and (AGENT_LABEL not in spec.runner.labels or AGENT_LABEL in included)
+        and (chosen is None or name in chosen)
     )
 
 
@@ -107,6 +113,7 @@ class Runner:
         hosts: Sequence[str],
         run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
         labels: Collection[str] = (),
+        assets: Collection[AssetName] | None = None,
     ) -> None:
         self._services = services
         self._pack = pack
@@ -115,6 +122,7 @@ class Runner:
         self._hosts = tuple(hosts)
         self._run = run or _run
         self._labels = tuple(labels)
+        self._assets = None if assets is None else frozenset(assets)
 
     def claim_once(self) -> RunOrder | None:
         """Run one queued order to completion; None when no eligible order can be leased."""
@@ -225,7 +233,7 @@ class Runner:
         in the same transaction, so the runner needs no separate sweep. An order
         another runner completes mid-claim cannot be re-created either: the claim
         leases a queued row or answers none, never `start`ing a fresh one for a pair."""
-        assets = set(runnable(self._pack, self._labels))
+        assets = set(runnable(self._pack, self._labels, self._assets))
         return self._services.ops.claim(self._worker, self._lease_for, assets, mirror_affinity=True)
 
     def _values(self, order: RunOrder, spec: AssetSpec) -> dict[str, str]:

@@ -126,6 +126,14 @@ def test_only_command_assets_are_runnable() -> None:
     assert "diff_scan" in runnable(pack, ["llm"])  # a host that carries the harness
 
 
+def test_only_named_assets_are_runnable() -> None:
+    """`claim --asset`: the named assets only, still subject to the label gate — a named
+    `llm` asset needs its label too, and the unnamed ones are another pool's."""
+    pack = Pack.load(PACK)
+    assert runnable(pack, (), ["repo_state"]) == ("repo_state",)
+    assert runnable(pack, ["llm"], ["diff_scan", "repo_state"]) == ("repo_state", "diff_scan")
+
+
 def test_a_disabled_asset_is_not_claimable() -> None:
     raw = yaml.safe_load(PACK.read_text())
     raw["assets"]["diff_scan"]["enabled"] = False
@@ -342,6 +350,58 @@ def test_claim_from_the_cli_runs_one_order_and_exits_with_its_outcome(
     rc, order = run("--worker", "w1")
     assert (rc, order["state"], order["reason"]) == (1, "failed", "runner-crashed")
     assert run() == (0, {"claimed": None})
+
+
+def test_claim_given_assets_leases_only_those(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`claim --asset`: the worker leases only the named assets' orders — a pool split
+    by asset — and without the flag every asset, as before."""
+    core = _core(tmp_path)
+    _submit(Context.from_file(core), "feeds_cache")
+    _submit(Context.from_file(core), "repo_state", repo=True)
+    monkeypatch.setattr("traust_engine.ops.runner._run", Commands())
+
+    def claim(*extra: str) -> tuple[int, Any]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = cli.main(["claim", "--core", str(core), "--pack", str(PACK), *extra])
+        return rc, json.loads(out.getvalue())
+
+    rc, order = claim("--asset", "repo_state")
+    assert rc == 0 and order["asset"] == "repo_state"
+    assert claim("--asset", "repo_state") == (0, {"claimed": None})  # feeds_cache waits
+    rc, order = claim()  # no flag: every asset the runner makes
+    assert rc == 0 and order["asset"] == "feeds_cache"
+
+
+def test_a_named_llm_asset_still_needs_its_label(context: Context) -> None:
+    """`--asset` and `--label` compose: naming a skill session's asset does not hand its
+    orders to a runner without the agent harness — the label gate stands."""
+    _submit(context, "diff_scan", priority=0, repo=True)
+    commands = Commands()
+    narrow = Runner(
+        context.services(),
+        Pack.load(PACK),
+        WORKER,
+        timedelta(minutes=5),
+        HOSTS,
+        commands,
+        assets=["diff_scan"],
+    )
+    assert narrow.claim_once() is None
+    assert commands.seen == []
+    done = Runner(
+        context.services(),
+        Pack.load(PACK),
+        WORKER,
+        timedelta(minutes=5),
+        HOSTS,
+        commands,
+        labels=["llm"],
+        assets=["diff_scan"],
+    ).claim_once()
+    assert done is not None and done.asset == "diff_scan"
 
 
 def test_a_real_command_is_run_without_a_shell(context: Context) -> None:

@@ -28,7 +28,12 @@ from uuid import uuid4
 from traust_core.v1.context import Context, correlation_scope
 from traust_core.v1.errors import ConfigError, NotFoundError, PreflightError, TraustError
 from traust_core.v1.models.identity import Principal
-from traust_core.v1.models.operations import OrderRequest, OrderState, WorkerId
+from traust_core.v1.models.operations import (
+    AssetName,
+    OrderRequest,
+    OrderState,
+    WorkerId,
+)
 from traust_core.v1.models.vocabulary import ActorKind
 
 from traust_engine.ops.controller import is_remediation_run
@@ -81,7 +86,9 @@ def _router(spec: str) -> Any:
 
 
 @contextmanager
-def _loop(core: Context, pack: Pack, router: str | None) -> Iterator[EngineLoop]:
+def _loop(
+    core: Context, pack: Pack, router: str | None, assets: Collection[AssetName] | None = None
+) -> Iterator[EngineLoop]:
     with core.repository_observation() as observation:
         services = core.services()
         yield EngineLoop(
@@ -93,6 +100,7 @@ def _loop(core: Context, pack: Pack, router: str | None) -> Iterator[EngineLoop]
             # the trigger's state reads are core's scheduling service, direct: the engine
             # holds core's context, so no adapter sits between the loop and the domain
             services.remediation_scheduling,
+            assets=assets,
         )
 
 
@@ -246,7 +254,13 @@ def _diff(args: argparse.Namespace, core: Context, pack: Pack) -> int:
 def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
     worker = WorkerId(args.worker or f"{socket.gethostname()}:{os.getpid()}")
     runner = Runner(
-        core.services(), pack, worker, args.lease, core.config.forge_hosts, labels=args.label
+        core.services(),
+        pack,
+        worker,
+        args.lease,
+        core.config.forge_hosts,
+        labels=args.label,
+        assets=args.asset or None,
     )
     if not args.loop:
         order = runner.claim_once()
@@ -324,7 +338,17 @@ def _parser() -> argparse.ArgumentParser:
 
     ap = argparse.ArgumentParser(prog="traust-engine", description=__doc__)
     sub = ap.add_subparsers(dest="op", required=True)
-    sub.add_parser("run", parents=[common, passes], help="reap, tick and admit, pass after pass")
+    run = sub.add_parser(
+        "run", parents=[common, passes], help="reap, tick and admit, pass after pass"
+    )
+    run.add_argument(
+        "--asset",
+        action="append",
+        default=[],
+        metavar="ASSET",
+        help="plan and admit only this asset (repeatable): the pack's other assets"
+        " are left untouched for another engine (default: every asset)",
+    )
     sub.add_parser(
         "shadow", parents=[common, passes], help="print what each pass would plan, planning nothing"
     )
@@ -370,6 +394,14 @@ def _parser() -> argparse.ArgumentParser:
             " skill sessions are left for runner pools whose images carry the agent"
             " harness; pass --label llm on a host that has one)"
         ),
+    )
+    claim.add_argument(
+        "--asset",
+        action="append",
+        default=[],
+        metavar="ASSET",
+        help="claim only this asset's orders (repeatable), still subject to --label"
+        " (default: every asset this runner makes)",
     )
     return ap
 
@@ -448,6 +480,17 @@ def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
                 if args.models:
                     core.register_model_catalog(args.models)
                 pack = Pack.load(args.pack, *args.pin, *([args.feeds] if args.feeds else []))
+                # `--asset` fails closed: a name the pack doesn't carry is a startup
+                # error naming it, never a silently empty tick.
+                named: tuple[AssetName, ...] = ()
+                if args.op in ("run", "claim"):
+                    unknown = sorted(name for name in args.asset if name not in pack.assets)
+                    if unknown:
+                        raise ConfigError(
+                            f"pack {pack.pack} has no asset {', '.join(unknown)}"
+                            " -- check --asset against the pack"
+                        )
+                    named = tuple(args.asset)
                 if args.op in ("run", "shadow", "claim"):
                     core.register_toolchain()
                 if args.op in ("run", "shadow"):
@@ -456,12 +499,17 @@ def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
                             f"pack {pack.pack} sets route_on {pack.route_on}, but no --router was "
                             "given -- pass --router module:Class, or drop route_on from the pack"
                         )
-                    core.preflight(pack.requirements())
-                    engine = stack.enter_context(_loop(core, pack, args.router))
+                    core.preflight(
+                        pack.requirements()
+                        if not named
+                        else (pack.assets[name].requires for name in named)
+                    )
+                    engine = stack.enter_context(_loop(core, pack, args.router, named or None))
                 else:
                     if args.op == "claim":
                         core.preflight(
-                            pack.assets[name].requires for name in runnable(pack, args.label)
+                            pack.assets[name].requires
+                            for name in runnable(pack, args.label, named or None)
                         )
                     engine = None
             except Exception as error:
