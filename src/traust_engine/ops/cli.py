@@ -39,7 +39,7 @@ from traust_core.v1.models.vocabulary import ActorKind
 from traust_engine.ops.controller import is_remediation_run
 from traust_engine.ops.events import lifecycle
 from traust_engine.ops.loop import EngineLoop
-from traust_engine.ops.pack import Pack
+from traust_engine.ops.pack import AGENT_LABEL, Pack
 from traust_engine.ops.runner import Runner, runnable
 from traust_engine.ops.shadow import (
     Diff,
@@ -502,11 +502,34 @@ def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
                             f"pack {pack.pack} gives {', '.join(commandless)} no command"
                             " -- a claim worker can't run it; drop it from --asset"
                         )
+                    if args.op == "claim":
+                        # a named llm asset without --label llm leaves runnable() empty: the
+                        # worker would idle, so fail closed naming the asset and the label
+                        unlabeled = sorted(
+                            name
+                            for name in args.asset
+                            if AGENT_LABEL in pack.assets[name].runner.labels
+                            and AGENT_LABEL not in args.label
+                        )
+                        if unlabeled:
+                            raise ConfigError(
+                                f"pack {pack.pack} labels {', '.join(unlabeled)} {AGENT_LABEL}"
+                                f" -- a claim worker needs --label {AGENT_LABEL} to run it;"
+                                " pass the label or drop it from --asset"
+                            )
                     named = tuple(args.asset)
                 if args.op in ("run", "shadow", "claim"):
                     core.register_toolchain()
                 if args.op in ("run", "shadow"):
-                    if pack.route_on is not None and not args.router:
+                    # the router turns the route_on source's feed changes into orders for
+                    # lane assets, so a pass given only lane-less assets needs none: the
+                    # source itself runs by cadence, its materializations another engine's
+                    # routing input, not this one's
+                    if (
+                        pack.route_on is not None
+                        and not args.router
+                        and (not named or any(pack.assets[n].trigger.lanes for n in named))
+                    ):
                         raise ConfigError(
                             f"pack {pack.pack} sets route_on {pack.route_on}, but no --router was "
                             "given -- pass --router module:Class, or drop route_on from the pack"

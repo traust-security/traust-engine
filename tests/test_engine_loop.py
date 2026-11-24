@@ -600,6 +600,29 @@ def test_admission_leaves_another_engines_planned_orders_untouched(tmp_path: Pat
     assert untouched.state == OrderState.PLANNED and untouched.reason is None
 
 
+def test_a_given_pass_still_withholds_an_order_the_pack_lacks_or_disables(
+    tmp_path: Path,
+) -> None:
+    """The not-in-pack withhold comes before the selection skip: a planned order for an
+    asset the pack lacks or disables is any engine's to withhold, so a fully split
+    deployment — every engine running with --asset — leaves no stray planned order."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    (repo,) = _repositories(services, 1)
+    pack = _pack(tmp_path, diff_scan={"enabled": False})
+    stranger = services.ops.plan(OrderRequest(asset="gone", priority=1, repository_id=repo), ENGINE)
+    disabled = services.ops.plan(
+        OrderRequest(asset="diff_scan", priority=1, repository_id=repo), ENGINE
+    )
+    assert stranger.id is not None and disabled.id is not None
+
+    report = EngineLoop(services, clock, pack, assets=("feeds_cache",)).run_once()
+
+    assert report.admission.withheld == 2
+    assert services.ops.get(stranger.id).state == OrderState.WITHHELD
+    assert services.ops.get(disabled.id).state == OrderState.WITHHELD
+
+
 def test_a_route_to_a_lane_this_tick_was_not_given_plans_nothing(tmp_path: Path) -> None:
     clock = Clock()
     services = _context(tmp_path, clock).services()
@@ -782,6 +805,36 @@ def test_a_restart_resumes_routing_after_the_last_routed_order(tmp_path: Path) -
     services, clock, _ = _routed_loop(tmp_path, router)
     restarted = EngineLoop(services, clock, Pack.load(PACK), router, state_of=lambda r: r)
     assert restarted.run_once().tick.routed == 0
+
+
+def test_a_restarted_engine_given_assets_resumes_after_its_own_last_routed_order(
+    tmp_path: Path,
+) -> None:
+    """A restarted engine given assets seeds its routing cursor from the last routed
+    order among them, not the global one: another engine's routed orders must not skip
+    the events this selection has yet to route — a split fleet's restarted half still
+    routes what its own lanes owe."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    first, second = _repositories(services, 2)
+    pack = _iac_pack(tmp_path)
+    _materialize(services, "repo_state", first)
+    _materialize(services, "repo_state", second)
+    clock.at += timedelta(minutes=10)
+    scans = EngineLoop(
+        services, clock, pack, TableAndAdditiveRouter(), state_of=lambda r: r, assets=("diff_scan",)
+    )
+    assert scans.run_once().tick.routed == 2
+    assert _by_asset(_orders(services, *OPEN_ORDER_STATES)) == {"diff_scan": 2}
+
+    clock.at += timedelta(minutes=10)
+    restarted = EngineLoop(
+        services, clock, pack, TableAndAdditiveRouter(), state_of=lambda r: r, assets=("iac_lane",)
+    )
+    report = restarted.run_once()
+
+    assert report.tick.routed == 2  # both repositories' events were still this lane's to route
+    assert _by_asset(_orders(services, *OPEN_ORDER_STATES)) == {"diff_scan": 2, "iac_lane": 2}
 
 
 def test_a_restart_with_nothing_routed_looks_back_one_cadence(tmp_path: Path) -> None:

@@ -182,6 +182,39 @@ def test_a_claim_worker_named_a_commandless_asset_refuses_to_start(tmp_path: Pat
     assert rc == 2 and "gives graph no command" in err
 
 
+def test_a_claim_worker_named_an_llm_asset_without_the_label_refuses_to_start(
+    tmp_path: Path,
+) -> None:
+    """A claim worker that names an `llm` asset without `--label llm` can run nothing —
+    the label gate stands — so it is a startup error naming the asset and the missing
+    label, never a worker that sits idle on an empty runnable()."""
+    core = _core(tmp_path)
+
+    rc, _, err = _start(core, PACK, "claim", "--asset", "diff_scan")
+
+    assert rc == 2 and "labels diff_scan llm" in err and "--label llm" in err
+    assert _orders(core) == []
+
+    rc, out, _ = _start(core, PACK, "claim", "--asset", "diff_scan", "--label", "llm")
+    assert rc == 0 and json.loads(out) == {"claimed": None}  # the label opens the gate
+
+
+def test_run_given_no_laned_asset_needs_no_router(tmp_path: Path) -> None:
+    """The router turns the route_on source's feed changes into orders for lane assets,
+    so a pass given no lane asset starts without --router — the source itself runs by
+    cadence, its materializations another engine's routing input — while one given a
+    lane asset still refuses."""
+    core = _core(tmp_path)
+
+    rc, _, _ = _start(core, PACK, "run", "--once", "--asset", "repo_state")
+    assert rc == 0
+    assert _orders(core) == []  # no repositories: the source's cadence plans nothing
+
+    rc, _, err = _start(core, PACK, "run", "--once", "--asset", "diff_scan")
+    assert rc == 2 and "no --router was given" in err
+    assert _orders(core) == []
+
+
 def test_run_given_assets_plans_and_admits_only_those(tmp_path: Path) -> None:
     """`run --asset` at the CLI: the pass plans and admits the named assets only, and
     preflights only what it was given — without the flag, every asset, as before."""

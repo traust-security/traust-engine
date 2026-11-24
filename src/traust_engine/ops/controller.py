@@ -29,6 +29,7 @@ from traust_core.v1.models.operations import (
     VERIFY_RULE_PREFIX,
     AssetName,
     LaneName,
+    OrderFilter,
     OrderReason,
     OrderRequest,
     OrderState,
@@ -275,7 +276,7 @@ class Controller(Generic[S]):
             return [], 0, 0, 0
         if self._cursor is None:
             since = self._pack.assets[source].trigger.since(now) or now
-            last = self._ops.last_routed()
+            last = self._last_routed(since)
             self._cursor = encode_cursor(since if last is None else max(last, since), UUID(int=0))
         before = self._cursor
         try:
@@ -325,6 +326,43 @@ class Controller(Generic[S]):
         except Exception:
             self._cursor = before
             raise
+
+    def _last_routed(self, since: datetime) -> datetime | None:
+        """When the router last planned an order this tick's selection plans: without
+        `--asset`, the newest routed order anywhere; with it, the newest among the
+        selected assets — another engine's routed orders are not this cursor's to resume
+        after, or the events they consumed would be skipped for the lanes this selection
+        has yet to route."""
+        if self._assets is None:
+            return self._ops.last_routed()
+        last: datetime | None = None
+        for name in sorted(self._assets):
+            spec = self._pack.assets.get(name)
+            if spec is None or not spec.trigger.lanes:
+                continue  # only a lane's asset carries routed orders
+            routed = self._last_routed_of(name, since)
+            if routed is not None and (last is None or routed > last):
+                last = routed
+        return last
+
+    def _last_routed_of(self, name: AssetName, since: datetime) -> datetime | None:
+        """The newest routed order (`lane` set) of `name`, reading no further back than
+        `since` — the cadence lookback that bounds the seed anyway, so an order at or
+        below it cannot raise the seed. The pages run newest first."""
+        cursor: Cursor | None = None
+        while True:
+            page = self._ops.list(
+                OrderFilter(states=tuple(OrderState), asset=name),
+                PageRequest(limit=FEED_PAGE, cursor=cursor),
+            )
+            for order in page.items:
+                if order.created_at <= since:
+                    return None
+                if order.lane is not None:
+                    return order.created_at
+            if page.next is None:
+                return None
+            cursor = page.next
 
     def _changes(
         self, source: AssetName
