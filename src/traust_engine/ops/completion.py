@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from traust_core.v1.context import OpsService
+from traust_core.v1.errors import ConflictError
 from traust_core.v1.models.operations import JobResult, OrderState, RunOrder, WorkerId
 
 from traust_engine.ops.events import lifecycle
@@ -25,6 +26,9 @@ def complete(
     assert order.id is not None
     try:
         completed = ops.complete(order.id, worker, result, lease_generation=order.lease_generation)
+    except ConflictError:
+        # Caller logs lost leases as lease_lost; never inflate completion_error.
+        raise
     except Exception as error:
         lifecycle(
             logger,
