@@ -153,10 +153,11 @@ class Runner:
             )
             raise
         stop = threading.Event()
+        lost = threading.Event()
         context = copy_context()
         beat = threading.Thread(
             target=context.run,
-            args=(self._heartbeat, order.id, order.lease_generation, stop),
+            args=(self._heartbeat, order.id, order.lease_generation, stop, lost),
             daemon=True,
         )
         beat.start()
@@ -182,6 +183,16 @@ class Runner:
         finally:
             stop.set()
             beat.join()
+        if lost.is_set():
+            lifecycle(
+                log,
+                "execution",
+                "lease_lost",
+                started=started,
+                reason="lease_conflict",
+                returncode=returncode,
+            )
+            return order
         return self._finish(
             order,
             result,
@@ -199,16 +210,28 @@ class Runner:
         returncode: int | None = None,
         error_type: str | None = None,
     ) -> RunOrder:
-        return complete(
-            self._services.ops,
-            log,
-            order,
-            self._worker,
-            result,
-            started,
-            returncode=returncode,
-            error_type=error_type,
-        )
+        try:
+            return complete(
+                self._services.ops,
+                log,
+                order,
+                self._worker,
+                result,
+                started,
+                returncode=returncode,
+                error_type=error_type,
+            )
+        except ConflictError as error:
+            lifecycle(
+                log,
+                "completion",
+                "lease_lost",
+                started=started,
+                reason="lease_conflict",
+                error_type=type(error).__name__,
+                returncode=returncode,
+            )
+            return order
 
     def _lease(self) -> RunOrder | None:
         """Lease the next queued order of an asset this runner makes, most important first.
@@ -246,7 +269,9 @@ class Runner:
             values["repo_url"] = str(HttpsRepoUrl.parse(url, self._hosts))
         return values
 
-    def _heartbeat(self, order_id: UUID, lease_generation: int, stop: threading.Event) -> None:
+    def _heartbeat(
+        self, order_id: UUID, lease_generation: int, stop: threading.Event, lost: threading.Event
+    ) -> None:
         while not stop.wait(self._lease_for.total_seconds() / 3):
             started = perf_counter()
             try:
@@ -254,6 +279,7 @@ class Runner:
                     order_id, self._worker, self._lease_for, lease_generation=lease_generation
                 )
             except ConflictError as error:
+                lost.set()
                 lifecycle(
                     log,
                     "heartbeat",

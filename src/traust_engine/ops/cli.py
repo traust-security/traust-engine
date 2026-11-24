@@ -253,6 +253,9 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
         if order is None:
             print(json.dumps({"claimed": None}))
             return 0
+        if order.state not in _EXIT:
+            print(json.dumps({"claimed": str(order.id), "lease_lost": True}))
+            return 2
         print(order.model_dump_json())
         return _EXIT[order.state]
     # The pool's shape: keep claiming while work flows, back off when the queue is
@@ -293,6 +296,9 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
             stop.wait(args.idle.total_seconds())
             continue
         idled = False
+        if order.state not in _EXIT:
+            print(json.dumps({"claimed": str(order.id), "lease_lost": True}), flush=True)
+            continue
         print(order.model_dump_json(), flush=True)
     return 0
 

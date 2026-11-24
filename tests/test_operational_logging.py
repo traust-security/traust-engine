@@ -169,8 +169,8 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
         run=slow,
     )
     with correlation_scope("heartbeat-request", actor_kind=ActorKind.MACHINE):
-        with pytest.raises(ConflictError, match="expired"):
-            runner.claim_once()
+        done = runner.claim_once()
+        assert done is not None and done.id == queued.id
         restored = current_correlation()
         assert restored is not None and restored.order_id is None and restored.run_id is None
     assert seen and seen[0] is not None
