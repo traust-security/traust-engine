@@ -159,6 +159,29 @@ def test_an_asset_not_in_the_pack_refuses_to_start(tmp_path: Path, op: str) -> N
     assert _orders(core) == []
 
 
+@pytest.mark.parametrize("op", ["run", "claim"])
+def test_a_disabled_asset_named_refuses_to_start(tmp_path: Path, op: str) -> None:
+    """A disabled asset never runs, so naming it is a startup error, not an idle tick."""
+    core = _core(tmp_path)
+    pack = _pack(tmp_path, {"scanner": {**SCANNER, "enabled": False}})
+    once = ("--once",) if op == "run" else ()
+
+    rc, _, err = _start(core, pack, op, "--asset", "scanner", *once)
+
+    assert rc == 2 and "disables scanner" in err
+    assert _orders(core) == []
+
+
+def test_a_claim_worker_named_a_commandless_asset_refuses_to_start(tmp_path: Path) -> None:
+    """A claim worker runs commands; naming an asset with none is a startup error."""
+    core = _core(tmp_path)
+    pack = _pack(tmp_path, {"graph": SESSION})
+
+    rc, _, err = _start(core, pack, "claim", "--asset", "graph", "--label", "llm")
+
+    assert rc == 2 and "gives graph no command" in err
+
+
 def test_run_given_assets_plans_and_admits_only_those(tmp_path: Path) -> None:
     """`run --asset` at the CLI: the pass plans and admits the named assets only, and
     preflights only what it was given — without the flag, every asset, as before."""

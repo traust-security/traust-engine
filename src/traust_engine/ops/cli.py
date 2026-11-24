@@ -490,6 +490,18 @@ def _run_with_stack(args: argparse.Namespace, core: Context) -> int:
                             f"pack {pack.pack} has no asset {', '.join(unknown)}"
                             " -- check --asset against the pack"
                         )
+                    disabled = sorted(n for n in args.asset if not pack.assets[n].enabled)
+                    if disabled:
+                        raise ConfigError(
+                            f"pack {pack.pack} disables {', '.join(disabled)}"
+                            " -- a disabled asset never runs; drop it from --asset"
+                        )
+                    commandless = sorted(n for n in args.asset if not pack.assets[n].run)
+                    if args.op == "claim" and commandless:
+                        raise ConfigError(
+                            f"pack {pack.pack} gives {', '.join(commandless)} no command"
+                            " -- a claim worker can't run it; drop it from --asset"
+                        )
                     named = tuple(args.asset)
                 if args.op in ("run", "shadow", "claim"):
                     core.register_toolchain()
