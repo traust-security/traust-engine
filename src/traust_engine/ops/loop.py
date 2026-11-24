@@ -3,7 +3,7 @@ work, admit."""
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import Generic, TypeVar
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -12,7 +12,7 @@ from traust_core.v1.context import Clock, Router, Services
 from traust_core.v1.models.base import Model
 from traust_core.v1.models.common import Cursor, every_item
 from traust_core.v1.models.inventory import RecordedRelease, RepositoryFilter
-from traust_core.v1.models.operations import OrderRequest
+from traust_core.v1.models.operations import AssetName, OrderRequest
 
 from traust_engine.ops.admission import Admission, AdmissionReport
 from traust_engine.ops.controller import ENGINE, Controller, Scheduling, TickReport
@@ -47,9 +47,13 @@ class EngineLoop(Generic[S]):
         router: Router[S, RecordedRelease] | None = None,
         state_of: Callable[[UUID], S] | None = None,
         remediations: Scheduling | None = None,
+        assets: Collection[AssetName] | None = None,
     ) -> None:
         self._services = services
         self._pack = pack
+        # `run --asset`: the tick plans, and the pass admits, only the named assets —
+        # the rest are left untouched for the engine that was given them.
+        selected = None if assets is None else frozenset(assets)
         self._controller = Controller(
             pack,
             services.ops,
@@ -59,8 +63,9 @@ class EngineLoop(Generic[S]):
             services.feed,
             services.portfolio,
             remediations,
+            assets=selected,
         )
-        self._admission = Admission(pack, services.ops, services.spend, clock)
+        self._admission = Admission(pack, services.ops, services.spend, clock, assets=selected)
         self._remediation_cursor: Cursor | None = None
 
     def run_once(self) -> PassReport:

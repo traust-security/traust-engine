@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -51,12 +51,24 @@ class TokenBucket:
 
 
 class Admission:
-    def __init__(self, pack: Pack, ops: OpsService, spend: SpendService, clock: Clock) -> None:
+    def __init__(
+        self,
+        pack: Pack,
+        ops: OpsService,
+        spend: SpendService,
+        clock: Clock,
+        assets: Collection[AssetName] | None = None,
+    ) -> None:
         self._pack = pack
         self._ops = ops
         self._spend = spend
         self._clock = clock
         self._buckets: dict[str, TokenBucket] = {}
+        # None: every planned order is this engine's to admit. A set (`run --asset`):
+        # the pass was narrowed to those assets, and another engine's planned orders
+        # wait untouched for their own admission — except one for an asset the pack lacks
+        # or disables, which any engine withholds (see admit).
+        self._assets = None if assets is None else frozenset(assets)
 
     def admit(self, hosts: Mapping[UUID, str]) -> AdmissionReport:
         """Admit, hold for approval, withhold (budget) or defer (pacing, quota) each planned
@@ -71,8 +83,14 @@ class Admission:
             asset = AssetName(order.asset)
             spec = self._pack.assets.get(asset)
             if spec is None or not spec.enabled:
+                # first, whatever the selection: a pack that lacks or disables the asset
+                # never runs its orders, and a fully split deployment leaves no engine
+                # that was given them — any pass may withhold the stray order
                 self._ops.withhold(order.id, OrderReason.ASSET_NOT_IN_PACK)
                 report["withheld"] += 1
+                continue
+            if self._assets is not None and asset not in self._assets:
+                # another engine's planned order: left untouched for its own admission
                 continue
             verdict = self._verdict(order, spec, budgets, committed)
             pacing, quota = spec.admission.pacing, spec.admission.quota

@@ -29,6 +29,7 @@ from traust_core.v1.models.operations import (
     VERIFY_RULE_PREFIX,
     AssetName,
     LaneName,
+    OrderFilter,
     OrderReason,
     OrderRequest,
     OrderState,
@@ -138,6 +139,7 @@ class Controller(Generic[S]):
         feed: FeedQuery | None = None,
         portfolio: Releases | None = None,
         remediations: Scheduling | None = None,
+        assets: Collection[AssetName] | None = None,
     ) -> None:
         if (router is None) != (state_of is None) or (
             router is not None and (feed is None or portfolio is None)
@@ -155,6 +157,10 @@ class Controller(Generic[S]):
         self._feed = feed
         self._portfolio = portfolio
         self._remediations = remediations
+        # None: the tick plans every asset the pack runs. A set (`run --asset`): the
+        # tick plans only those, and the rest — cadence, routed, remediation — is left
+        # untouched for the engine that was given them.
+        self._assets = None if assets is None else frozenset(assets)
         self._cursor: Cursor | None = None
         # Repositories whose remediation demand an attempt within the retry window
         # holds, with the earliest pass that may wake them — a wake is a recheck of
@@ -162,6 +168,11 @@ class Controller(Generic[S]):
         # moved on dispatches nothing. In memory only: a restart's full feed replay
         # re-derives it from the attempted orders it sees.
         self._deferred: dict[UUID, datetime] = {}
+
+    def _selects(self, name: AssetName) -> bool:
+        """Whether this tick plans the asset: every one when none were named (`--asset`),
+        only the named ones otherwise — the rest are another engine's."""
+        return self._assets is None or name in self._assets
 
     def tick(self, repositories: Collection[UUID]) -> TickReport:
         report, requests, stops = self.due(repositories)
@@ -180,14 +191,16 @@ class Controller(Generic[S]):
         stops it would record on the feed, writing nothing: the shadow run's view of the loop."""
         now = self._clock.now()
         unrunnable = tuple(
-            name for name, spec in self._pack.assets.items() if not spec.run and spec.model is None
+            name
+            for name, spec in self._pack.assets.items()
+            if not spec.run and spec.model is None and self._selects(name)
         )
         requests, routed, unrouted, refused_again = self._route(now, set(repositories))
         planned, stale, stops = 0, {}, []
         for name in self._pack.topo_order():
             spec = self._pack.assets[name]
             since = spec.trigger.since(now)
-            if since is None or not spec.enabled:
+            if since is None or not spec.enabled or not self._selects(name):
                 continue
             subjects: Collection[UUID | None] = repositories if spec.partitions else (None,)
             busy = self._ops.subjects(name, OPEN_ORDER_STATES) | self._ops.subjects(
@@ -240,7 +253,7 @@ class Controller(Generic[S]):
         a disabled asset is not one the deployment is failing to keep fresh."""
         overdue = {}
         for name, spec in self._pack.assets.items():
-            if spec.freshness.fail is None or not spec.enabled:
+            if spec.freshness.fail is None or not spec.enabled or not self._selects(name):
                 continue
             subjects = set(repositories) if spec.partitions else {None}
             fresh = self._ops.subjects(name, MATERIALIZED, now - spec.freshness.fail)
@@ -263,7 +276,7 @@ class Controller(Generic[S]):
             return [], 0, 0, 0
         if self._cursor is None:
             since = self._pack.assets[source].trigger.since(now) or now
-            last = self._ops.last_routed()
+            last = self._last_routed(since)
             self._cursor = encode_cursor(since if last is None else max(last, since), UUID(int=0))
         before = self._cursor
         try:
@@ -292,7 +305,7 @@ class Controller(Generic[S]):
                     except ConfigError:
                         unknown.add(route.lane)
                         continue
-                    if self._pack.assets[asset].enabled:
+                    if self._pack.assets[asset].enabled and self._selects(asset):
                         requests.append(
                             OrderRequest(
                                 asset=asset,
@@ -313,6 +326,43 @@ class Controller(Generic[S]):
         except Exception:
             self._cursor = before
             raise
+
+    def _last_routed(self, since: datetime) -> datetime | None:
+        """When the router last planned an order this tick's selection plans: without
+        `--asset`, the newest routed order anywhere; with it, the newest among the
+        selected assets — another engine's routed orders are not this cursor's to resume
+        after, or the events they consumed would be skipped for the lanes this selection
+        has yet to route."""
+        if self._assets is None:
+            return self._ops.last_routed()
+        last: datetime | None = None
+        for name in sorted(self._assets):
+            spec = self._pack.assets.get(name)
+            if spec is None or not spec.trigger.lanes:
+                continue  # only a lane's asset carries routed orders
+            routed = self._last_routed_of(name, since)
+            if routed is not None and (last is None or routed > last):
+                last = routed
+        return last
+
+    def _last_routed_of(self, name: AssetName, since: datetime) -> datetime | None:
+        """The newest routed order (`lane` set) of `name`, reading no further back than
+        `since` — the cadence lookback that bounds the seed anyway, so an order at or
+        below it cannot raise the seed. The pages run newest first."""
+        cursor: Cursor | None = None
+        while True:
+            page = self._ops.list(
+                OrderFilter(states=tuple(OrderState), asset=name),
+                PageRequest(limit=FEED_PAGE, cursor=cursor),
+            )
+            for order in page.items:
+                if order.created_at <= since:
+                    return None
+                if order.lane is not None:
+                    return order.created_at
+            if page.next is None:
+                return None
+            cursor = page.next
 
     def _changes(
         self, source: AssetName
@@ -599,6 +649,9 @@ class Controller(Generic[S]):
         deferral — the shadow consumes nothing. Returns whether the repository's demand
         was served — dispatched or deferred — so a woken deferral knows its pass owed it
         something."""
+        if not self._selects(asset):
+            # another engine's asset: this tick plans only what it was named
+            return False
         spec = self._pack.assets.get(asset)
         if spec is None or not spec.enabled:
             log.warning(

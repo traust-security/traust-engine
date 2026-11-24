@@ -32,6 +32,16 @@ local rig, an operator workstation with the agent CLI logged in) passes `--label
 include them. Unlabeled assets stay claimable: the label vocabulary is a proposal, and a
 pack yet to carry it names no executor the claim refuses to be.
 
+`run` and `claim` take a repeatable `--asset NAME` to narrow an engine (or a claim worker)
+to the named assets: the tick plans only those, admission leaves every other planned
+order untouched for the engine that was given them, and the claim leases only their
+orders — the shape of a deployment that splits its worker pools by asset, and of the
+SDK's e2e, which runs the shipped pack for the few assets it needs. A name the pack
+doesn't carry is a startup error naming it; the flag composes with `--label` (a named
+`llm` asset still needs `--label llm` to be claimed). Quota buckets are per engine —
+each keeps its own in-memory bucket for a shared key — so assets that share a quota
+key belong in the same engine.
+
 ## Migrating from the processing-library API on main
 
 The continuous-ops engine is **not a drop-in replacement** for the processing library

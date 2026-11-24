@@ -570,6 +570,85 @@ def test_a_disabled_asset_is_not_planned_or_reported(tmp_path: Path) -> None:
     assert _by_asset(_orders(services, OrderState.PLANNED)) == {"feeds_cache": 1}
 
 
+def test_a_tick_given_assets_plans_only_those(tmp_path: Path) -> None:
+    """`run --asset`: the tick plans the named assets only — a deployment splitting the
+    work by asset, or the SDK's e2e running the shipped pack for the few assets it
+    needs. The rest are left untouched for the engine that was given them."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 2)
+    report = EngineLoop(services, clock, Pack.load(PACK), assets=("repo_state",)).run_once()
+    assert report.tick.planned == 2  # repo_state x2; feeds_cache and dependency_graph not given
+    assert report.tick.stale == {}  # dependency_graph is another engine's, not this one's report
+    assert _by_asset(_orders(services, OrderState.QUEUED, OrderState.PLANNED)) == {"repo_state": 2}
+    assert report.admission.admitted == 2
+
+
+def test_admission_leaves_another_engines_planned_orders_untouched(tmp_path: Path) -> None:
+    """Admission admits only the given assets' orders: another engine's planned order
+    waits as it was left — neither withheld, deferred nor approved by this pass."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    (repo,) = _repositories(services, 1)
+    left = services.ops.plan(
+        OrderRequest(asset="diff_scan", priority=1, repository_id=repo, lane="diff-scan"), ENGINE
+    )
+    assert left.id is not None
+    report = EngineLoop(services, clock, Pack.load(PACK), assets=("feeds_cache",)).run_once()
+    assert report.admission.admitted == 1  # this pass's own feeds_cache order alone
+    untouched = services.ops.get(left.id)
+    assert untouched.state == OrderState.PLANNED and untouched.reason is None
+
+
+def test_a_given_pass_still_withholds_an_order_the_pack_lacks_or_disables(
+    tmp_path: Path,
+) -> None:
+    """The not-in-pack withhold comes before the selection skip: a planned order for an
+    asset the pack lacks or disables is any engine's to withhold, so a fully split
+    deployment — every engine running with --asset — leaves no stray planned order."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    (repo,) = _repositories(services, 1)
+    pack = _pack(tmp_path, diff_scan={"enabled": False})
+    stranger = services.ops.plan(OrderRequest(asset="gone", priority=1, repository_id=repo), ENGINE)
+    disabled = services.ops.plan(
+        OrderRequest(asset="diff_scan", priority=1, repository_id=repo), ENGINE
+    )
+    assert stranger.id is not None and disabled.id is not None
+
+    report = EngineLoop(services, clock, pack, assets=("feeds_cache",)).run_once()
+
+    assert report.admission.withheld == 2
+    assert services.ops.get(stranger.id).state == OrderState.WITHHELD
+    assert services.ops.get(disabled.id).state == OrderState.WITHHELD
+
+
+def test_a_route_to_a_lane_this_tick_was_not_given_plans_nothing(tmp_path: Path) -> None:
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 1)
+    loop = EngineLoop(
+        services, clock, Pack.load(PACK), LaneRouter(), state_of=lambda r: r, assets=("repo_state",)
+    )
+    loop.run_once()
+    clock.at += timedelta(minutes=10)
+    _drain(services)
+    report = loop.run_once()
+    assert report.tick.routed == 1  # the repository routed; its lane's asset was not given
+    assert _routed_orders(services) == []
+
+
+def test_a_given_tick_reports_only_its_own_assets_health(tmp_path: Path) -> None:
+    """Overdue is the deployment's failure to keep an asset fresh; an asset this engine
+    was not given is another engine's to keep fresh, like a disabled one is."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    _repositories(services, 2)
+    pack = _pack(tmp_path, repo_state={"freshness": {"fail": "72h"}, "admission": {}})
+    report = EngineLoop(services, clock, pack, assets=("feeds_cache",)).run_once()
+    assert report.tick.overdue == {}
+
+
 def test_the_run_manifest_names_the_toolchain_pins_next_to_the_pack(tmp_path: Path) -> None:
     pins = tmp_path / "external-tools.yaml"
     pins.write_text("tools: {grype: {version: 0.104.0}}\n")
@@ -726,6 +805,36 @@ def test_a_restart_resumes_routing_after_the_last_routed_order(tmp_path: Path) -
     services, clock, _ = _routed_loop(tmp_path, router)
     restarted = EngineLoop(services, clock, Pack.load(PACK), router, state_of=lambda r: r)
     assert restarted.run_once().tick.routed == 0
+
+
+def test_a_restarted_engine_given_assets_resumes_after_its_own_last_routed_order(
+    tmp_path: Path,
+) -> None:
+    """A restarted engine given assets seeds its routing cursor from the last routed
+    order among them, not the global one: another engine's routed orders must not skip
+    the events this selection has yet to route — a split fleet's restarted half still
+    routes what its own lanes owe."""
+    clock = Clock()
+    services = _context(tmp_path, clock).services()
+    first, second = _repositories(services, 2)
+    pack = _iac_pack(tmp_path)
+    _materialize(services, "repo_state", first)
+    _materialize(services, "repo_state", second)
+    clock.at += timedelta(minutes=10)
+    scans = EngineLoop(
+        services, clock, pack, TableAndAdditiveRouter(), state_of=lambda r: r, assets=("diff_scan",)
+    )
+    assert scans.run_once().tick.routed == 2
+    assert _by_asset(_orders(services, *OPEN_ORDER_STATES)) == {"diff_scan": 2}
+
+    clock.at += timedelta(minutes=10)
+    restarted = EngineLoop(
+        services, clock, pack, TableAndAdditiveRouter(), state_of=lambda r: r, assets=("iac_lane",)
+    )
+    report = restarted.run_once()
+
+    assert report.tick.routed == 2  # both repositories' events were still this lane's to route
+    assert _by_asset(_orders(services, *OPEN_ORDER_STATES)) == {"diff_scan": 2, "iac_lane": 2}
 
 
 def test_a_restart_with_nothing_routed_looks_back_one_cadence(tmp_path: Path) -> None:
