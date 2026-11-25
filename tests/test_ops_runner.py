@@ -24,6 +24,7 @@ from uuid import UUID
 import pytest
 import yaml
 from traust_core.v1.context import Config, Context
+from traust_core.v1.errors import ConflictError
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.inventory import RefName
@@ -100,7 +101,11 @@ def _submit(
         services.portfolio.mark_default_branch(repository.id, GitSha("a" * 40), RefName("main"))
         repository_id = repository.id
     request = OrderRequest(asset=asset, priority=priority, repository_id=repository_id, rule=rule)
-    return services.ops.submit(request, OPERATOR)
+    submitted = services.ops.submit(request, OPERATOR)
+    assert submitted.id is not None
+    return services.ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
 
 
 def _runner(
@@ -298,9 +303,9 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     services = context.services()
     real = services.ops.heartbeat
 
-    def heartbeat(*args: Any) -> RunOrder:
-        beats.append(args)
-        return real(*args)
+    def heartbeat(*args: Any, lease_generation: int) -> RunOrder:
+        beats.append((*args, lease_generation))
+        return real(*args, lease_generation=lease_generation)
 
     services.ops.heartbeat = heartbeat  # type: ignore[method-assign]
     runner = Runner(
@@ -308,7 +313,9 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
-    assert beats and all(b[0] == queued.id and b[1] == WORKER for b in beats)
+    assert beats and all(
+        (b[0], b[1], b[3]) == (queued.id, WORKER, done.lease_generation) for b in beats
+    )
 
 
 def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
@@ -319,11 +326,11 @@ def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
     services = context.services()
     real = services.ops.heartbeat
 
-    def flaky(*args: Any) -> RunOrder:
+    def flaky(*args: Any, lease_generation: int) -> RunOrder:
         beats.append(args)
         if len(beats) == 1:
             raise sqlite3.OperationalError("database is locked")
-        return real(*args)
+        return real(*args, lease_generation=lease_generation)
 
     services.ops.heartbeat = flaky  # type: ignore[method-assign]
     runner = Runner(
@@ -416,6 +423,93 @@ def test_a_real_command_is_run_without_a_shell(context: Context) -> None:
     assert done is not None and done.state == OrderState.DEGRADED
 
 
+def test_old_command_cannot_complete_a_same_worker_reclaim(tmp_path: Path) -> None:
+    class Clock:
+        at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        def now(self) -> datetime:
+            return self.at
+
+    clock = Clock()
+    context = Context(Config(home=tmp_path), clock=clock)
+    order = _submit(context, "feeds_cache")
+    ops = context.services().ops
+    lease = timedelta(minutes=5)
+
+    def reclaim_while_running(command: list[str]) -> subprocess.CompletedProcess[str]:
+        clock.at += 2 * lease
+        replacement = ops.claim(WORKER, lease, order_id=order.id)
+        assert replacement is not None and replacement.id == order.id
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    runner = Runner(
+        context.services(), Pack.load(PACK), WORKER, lease, HOSTS, reclaim_while_running
+    )
+    done = runner.claim_once()
+    assert done is not None and done.id == order.id
+    assert order.id is not None
+    current = ops.get(order.id)
+    assert current.state == OrderState.LEASED and current.lease_generation == 2
+
+
+def test_heartbeat_lease_loss_skips_doomed_completion(context: Context) -> None:
+    order = _submit(context, "feeds_cache")
+    services = context.services()
+    completed_calls: list[UUID] = []
+    real_complete = services.ops.complete
+    heartbeat_seen = threading.Event()
+
+    def lose_lease(*args: Any, **kwargs: Any) -> RunOrder:
+        heartbeat_seen.set()
+        raise ConflictError("lease belongs to another worker")
+
+    def record_complete(order_id: UUID, *args: Any, **kwargs: Any) -> RunOrder:
+        completed_calls.append(order_id)
+        return real_complete(order_id, *args, **kwargs)
+
+    services.ops.heartbeat = lose_lease  # type: ignore[method-assign]
+    services.ops.complete = record_complete  # type: ignore[method-assign]
+
+    def wait_for_heartbeat(command: list[str]) -> subprocess.CompletedProcess[str]:
+        assert heartbeat_seen.wait(timeout=2.0)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    runner = Runner(
+        services,
+        Pack.load(PACK),
+        WORKER,
+        timedelta(milliseconds=60),
+        HOSTS,
+        wait_for_heartbeat,
+    )
+    done = runner.claim_once()
+    assert done is not None and done.id == order.id
+    assert completed_calls == []
+
+
+def test_reclaimed_order_command_receives_its_generation(context: Context, tmp_path: Path) -> None:
+    queued = _submit(context, "feeds_cache")
+    first = context.services().ops.claim(WORKER, timedelta(seconds=0), order_id=queued.id)
+    assert first is not None
+    receipt = tmp_path / "claim"
+    pack = yaml.safe_load(PACK.read_text())
+    pack["assets"]["feeds_cache"]["run"] = [
+        sys.executable,
+        "-c",
+        "import sys; from pathlib import Path; Path(sys.argv[1]).write_text(' '.join(sys.argv[2:]))",
+        str(receipt),
+        "{run_id}",
+        "{lease_generation}",
+    ]
+    runner = Runner(
+        context.services(), Pack.model_validate(pack), WORKER, timedelta(minutes=5), HOSTS
+    )
+    done = runner.claim_once()
+    assert done is not None and done.state == OrderState.SUCCEEDED and done.id == first.id
+    assert done.lease_generation == first.lease_generation + 1
+    assert receipt.read_text() == f"{first.id} {done.lease_generation}"
+
+
 FEEDS = Path(__file__).parent / "fixtures" / "config" / "feeds.yaml"
 
 
@@ -487,7 +581,12 @@ def test_a_session_that_answers_its_usage_settles_it_as_the_orders_spend(
 ) -> None:
     core = _core(tmp_path)
     request = OrderRequest(asset="feeds_cache", priority=1, lane=LaneName("full-audit"))
-    queued = Context.from_file(core).services().ops.submit(request, OPERATOR)
+    ops = Context.from_file(core).services().ops
+    submitted = ops.submit(request, OPERATOR)
+    assert submitted.id is not None
+    queued = ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
     answer = JobResult.succeeded().model_copy(update={"usage": (SESSION,)}).model_dump_json()
     monkeypatch.setattr("traust_engine.ops.runner._run", Commands(f"session text\n{answer}"))
     argv = ["claim", "--core", str(core), "--pack", str(PACK)]
@@ -515,14 +614,19 @@ def _repository(context: Context, path: str = "example/app") -> UUID:
 
 def _order(context: Context, asset: str, repository_id: UUID, priority: int) -> RunOrder:
     request = OrderRequest(asset=asset, priority=priority, repository_id=repository_id)
-    return context.services().ops.submit(request, OPERATOR)
+    ops = context.services().ops
+    submitted = ops.submit(request, OPERATOR)
+    assert submitted.id is not None
+    return ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
 
 
 def _hold(
     context: Context, order: RunOrder, worker: str, lease_for: timedelta = timedelta(minutes=5)
-) -> None:
+) -> RunOrder:
     """Lease `order` to `worker` without running it, as a runner mid-command would have."""
-    context.services().ops.start(
+    return context.services().ops.start(
         OrderRequest(asset=order.asset, priority=order.priority, repository_id=order.repository_id),
         OPERATOR,
         WorkerId(worker),
@@ -593,11 +697,14 @@ def test_freeing_the_hold_lets_other_runners_claim(
     app = _repository(context)
     held = _order(context, "repo_state", app, priority=0)
     _order(context, "diff_scan", app, priority=1)
-    _hold(
+    held = _hold(
         context, held, "a", timedelta(minutes=5) if free == "complete" else timedelta(seconds=0.1)
     )
     if free == "complete":
-        context.services().ops.complete(held.id, WorkerId("a"), JobResult.succeeded())
+        assert held.id is not None
+        context.services().ops.complete(
+            held.id, WorkerId("a"), JobResult.succeeded(), lease_generation=held.lease_generation
+        )
     else:
         time.sleep(0.3)  # the lease lapses; the claim sweep requeues it
     done = _runner(context, Commands(), worker=WorkerId("b")).claim_once()
@@ -664,8 +771,11 @@ def test_a_claim_never_recreates_an_order_another_runner_completed(context: Cont
     victim = _order(context, "repo_state", _repository(context, "example/other"), priority=2)
     _hold(context, held, "a")
     services = context.services()
-    services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
-    services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
+    claim = services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
+    assert claim is not None and claim.id is not None
+    services.ops.complete(
+        claim.id, WorkerId("a"), JobResult.succeeded(), lease_generation=claim.lease_generation
+    )
 
     def no_start(*args: Any, **kw: Any) -> RunOrder:
         raise AssertionError("the runner leases through claim; start would re-create a pair")
@@ -714,3 +824,92 @@ def test_the_claim_loop_stops_on_term(tmp_path: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=10)
+
+
+def test_claim_from_the_cli_reports_lost_lease_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _core(tmp_path)
+    ctx = Context.from_file(core)
+    order = _submit(ctx, "feeds_cache")
+    assert order.id is not None
+
+    def reclaim_mid_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        ops = Context.from_file(core).services().ops
+        with SqlTraustUnitOfWork(Context.from_file(core).database) as uow:
+            row = uow.run_orders.get(order.id)
+            uow.run_orders.update(
+                row.model_copy(update={"lease_expires_at": datetime(2000, 1, 1, tzinfo=UTC)})
+            )
+            uow.commit()
+        reclaimed = ops.claim(WorkerId("other-worker"), timedelta(minutes=5), order_id=order.id)
+        assert reclaimed is not None and reclaimed.lease_generation == 2
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("traust_engine.ops.runner._run", reclaim_mid_run)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = cli.main(["claim", "--core", str(core), "--pack", str(PACK), "--worker", "w1"])
+    assert rc == 2
+    assert json.loads(out.getvalue()) == {"claimed": str(order.id), "lease_lost": True}
+    current = Context.from_file(core).services().ops.get(order.id)
+    assert current.state == OrderState.LEASED and current.lease_generation == 2
+
+
+def test_claim_loop_survives_lost_lease_and_runs_next_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _core(tmp_path)
+    ctx = Context.from_file(core)
+    first = _submit(ctx, "feeds_cache")
+    second = _submit(ctx, "feeds_cache")
+    assert first.id is not None and second.id is not None
+    calls = 0
+
+    def run_cmd(command: list[str]) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            ops = Context.from_file(core).services().ops
+            with SqlTraustUnitOfWork(Context.from_file(core).database) as uow:
+                row = uow.run_orders.get(first.id)
+                uow.run_orders.update(
+                    row.model_copy(update={"lease_expires_at": datetime(2000, 1, 1, tzinfo=UTC)})
+                )
+                uow.commit()
+            reclaimed = ops.claim(WorkerId("other-worker"), timedelta(minutes=5), order_id=first.id)
+            assert reclaimed is not None
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("traust_engine.ops.runner._run", run_cmd)
+    # Stop the loop cleanly after the queue drains ({"claimed": null}).
+    real_wait = threading.Event.wait
+
+    def stop_on_idle(self: threading.Event, timeout: float | None = None) -> bool:
+        if timeout == 60.0:
+            self.set()
+            return True
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", stop_on_idle)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = cli.main(
+            [
+                "claim",
+                "--loop",
+                "--idle",
+                "1m",
+                "--core",
+                str(core),
+                "--pack",
+                str(PACK),
+                "--worker",
+                "w1",
+            ]
+        )
+    assert rc == 0
+    records = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert records[0] == {"claimed": str(first.id), "lease_lost": True}
+    assert records[1]["id"] == str(second.id) and records[1]["state"] == "succeeded"
+    assert records[2] == {"claimed": None}

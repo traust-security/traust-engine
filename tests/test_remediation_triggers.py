@@ -592,7 +592,7 @@ def _run(services: Services, order: RunOrder, result: JobResult) -> None:
     worker = WorkerId("runner-1")
     claimed = services.ops.claim(worker, timedelta(minutes=5), (order.asset,))
     assert claimed is not None and claimed.id == order.id
-    services.ops.complete(order.id, worker, result)
+    services.ops.complete(order.id, worker, result, lease_generation=claimed.lease_generation)
 
 
 def _queued(services: Services, request: OrderRequest) -> RunOrder:
