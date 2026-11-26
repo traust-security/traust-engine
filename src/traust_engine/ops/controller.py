@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from datetime import datetime, timedelta
 from typing import Generic, Protocol, TypeVar
 from uuid import UUID
@@ -28,6 +28,7 @@ from traust_core.v1.models.operations import (
     REMEDIATE_RULE_PREFIX,
     VERIFY_RULE_PREFIX,
     AssetName,
+    ConfigDigest,
     LaneName,
     OrderFilter,
     OrderReason,
@@ -117,15 +118,23 @@ class Releases(Protocol):
 
 
 class Scheduling(Protocol):
-    """The scheduled-effort state reads the trigger needs; `Context.services()
-    .remediation_scheduling` satisfies it. The seam is structural by the consumer
-    rule (the ratchet's `core-internal`: the engine reaches core's services through
-    the context, never by importing them) — the domain it reads is core's, every
-    type below included: the state report, the fold, the reattempts derivation."""
+    """The scheduled-effort state reads the trigger needs, and the door its re-attempts
+    go through; `Context.services().remediation_scheduling` satisfies it. The seam is
+    structural by the consumer rule (the ratchet's `core-internal`: the engine reaches
+    core's services through the context, never by importing them) — the domain it reads
+    is core's, every type below included: the state report, the fold, the reattempts
+    derivation."""
 
     def state_of(self, work_item_id: UUID) -> RemediationState | None: ...
 
     def states_of(self, repository_id: UUID) -> list[RemediationState]: ...
+
+    def reattempt(
+        self, request: OrderRequest, principal: Principal, config: Sequence[ConfigDigest] = ()
+    ) -> RunOrder:
+        """The scheduling door for another attempt of a scheduled effort: remediate_finding
+        is door-only (traust-core#541), so the loop plans the trigger's re-attempts here."""
+        ...
 
 
 class Controller(Generic[S]):
