@@ -97,7 +97,10 @@ def _drain(services: Services, result: JobResult = SUCCEEDED) -> list[RunOrder]:
     """A runner claims and completes every queued order."""
     done = []
     while (order := services.ops.claim(WORKER, LEASE)) is not None:
-        done.append(services.ops.complete(order.id, WORKER, result))  # type: ignore[arg-type]
+        assert order.id is not None
+        done.append(
+            services.ops.complete(order.id, WORKER, result, lease_generation=order.lease_generation)
+        )
     return done
 
 
@@ -106,7 +109,7 @@ def _materialize(services: Services, asset: str, repository_id: UUID | None) -> 
         OrderRequest(asset=asset, priority=20, repository_id=repository_id), ENGINE, WORKER, LEASE
     )
     assert order.id is not None
-    services.ops.complete(order.id, WORKER, SUCCEEDED)
+    services.ops.complete(order.id, WORKER, SUCCEEDED, lease_generation=order.lease_generation)
 
 
 def _pack(tmp_path: Path, **changes: dict[str, Any]) -> Pack:
@@ -672,7 +675,7 @@ def _runs(services: Services, asset: str, repository_id: UUID | None = None) -> 
         OrderRequest(asset=asset, priority=1, repository_id=repository_id), ENGINE, WORKER, LEASE
     )
     assert order.id is not None
-    services.ops.complete(order.id, WORKER, SUCCEEDED)  # type: ignore[arg-type]
+    services.ops.complete(order.id, WORKER, SUCCEEDED, lease_generation=order.lease_generation)
 
 
 def _requests(report: Any) -> list[tuple[str, UUID | None]]:
@@ -747,13 +750,18 @@ def _refuse_the_scan(services: Services) -> RunOrder:
     """Routed and admitted, the repository's scan is refused (everything else succeeds)."""
     (scan,) = _scans(services, OrderState.QUEUED)
     assert scan.id is not None
-    services.ops.start(
+    claim = services.ops.start(
         OrderRequest(asset="diff_scan", priority=1, repository_id=scan.repository_id),
         ENGINE,
         WORKER,
         LEASE,
     )
-    services.ops.complete(scan.id, WORKER, JobResult.refused("diff-too-large"))
+    services.ops.complete(
+        scan.id,
+        WORKER,
+        JobResult.refused("diff-too-large"),
+        lease_generation=claim.lease_generation,
+    )
     _drain(services)
     return scan
 

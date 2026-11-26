@@ -63,6 +63,13 @@ _EXIT = {
     OrderState.DEGRADED: 4,
     OrderState.REFUSED: 5,
 }
+# A single-shot claim whose lease was lost: retryable, unlike 2 (startup, preflight, operation
+# or usage errors), so a supervisor can tell the two apart from the exit status alone.
+LEASE_LOST_EXIT = 3
+
+
+def _terminated(signum: int, frame: Any) -> None:
+    raise SystemExit(128 + signum)
 
 
 def _duration(value: str) -> timedelta:
@@ -263,10 +270,16 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
         assets=args.asset or None,
     )
     if not args.loop:
+        # A single-shot claim stops on TERM: the exit unwinds through the runner, which stops
+        # the command it is running (that command's own session never sees this signal).
+        signal.signal(signal.SIGTERM, _terminated)
         order = runner.claim_once()
         if order is None:
             print(json.dumps({"claimed": None}))
             return 0
+        if order.state not in _EXIT:
+            print(json.dumps({"claimed": str(order.id), "lease_lost": True}))
+            return LEASE_LOST_EXIT
         print(order.model_dump_json())
         return _EXIT[order.state]
     # The pool's shape: keep claiming while work flows, back off when the queue is
@@ -307,6 +320,9 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
             stop.wait(args.idle.total_seconds())
             continue
         idled = False
+        if order.state not in _EXIT:
+            print(json.dumps({"claimed": str(order.id), "lease_lost": True}), flush=True)
+            continue
         print(order.model_dump_json(), flush=True)
     return 0
 

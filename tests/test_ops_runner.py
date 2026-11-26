@@ -7,6 +7,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import queue
 import shutil
 import signal
@@ -24,6 +25,7 @@ from uuid import UUID
 import pytest
 import yaml
 from traust_core.v1.context import Config, Context
+from traust_core.v1.errors import ConflictError
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import IdentitySource, Principal
 from traust_core.v1.models.inventory import RefName
@@ -46,6 +48,7 @@ from traust_core.v1.models.vocabulary import ActorKind
 from traust_core.v1.repositories.contract import SqlTraustUnitOfWork
 
 from traust_engine.ops import cli
+from traust_engine.ops import runner as runner_module
 from traust_engine.ops.pack import Pack
 from traust_engine.ops.runner import Runner, UnresolvedParam, argv, runnable
 
@@ -75,7 +78,9 @@ class Commands:
         self.stdout, self.code, self.delay = stdout, code, delay
         self.seen: list[list[str]] = []
 
-    def __call__(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+    def __call__(
+        self, command: list[str], cancel: threading.Event | None = None
+    ) -> subprocess.CompletedProcess[str]:
         self.seen.append(command)
         time.sleep(self.delay)
         return subprocess.CompletedProcess(command, self.code, self.stdout, "")
@@ -285,7 +290,7 @@ def test_an_unresolved_param_fails_the_order(context: Context, tmp_path: Path) -
 def test_a_command_that_cannot_start_fails_the_order(context: Context) -> None:
     _submit(context, "feeds_cache")
 
-    def missing(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def missing(command: list[str], cancel: object = None) -> subprocess.CompletedProcess[str]:
         raise FileNotFoundError(command[0])
 
     runner = Runner(
@@ -302,17 +307,167 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     services = context.services()
     real = services.ops.heartbeat
 
-    def heartbeat(*args: Any) -> RunOrder:
-        beats.append(args)
-        return real(*args)
+    renewed = threading.Event()
+
+    def heartbeat(*args: Any, lease_generation: int) -> RunOrder:
+        beats.append((*args, lease_generation))
+        renewal = real(*args, lease_generation=lease_generation)
+        if len(beats) >= 2:
+            renewed.set()
+        return renewal
+
+    def until_renewed(
+        command: list[str], cancel: object = None
+    ) -> subprocess.CompletedProcess[str]:
+        # runs until two renewals land, not for a fixed time a loaded parallel run can outlast
+        assert renewed.wait(10)
+        return subprocess.CompletedProcess(command, 0, "", "")
 
     services.ops.heartbeat = heartbeat  # type: ignore[method-assign]
-    runner = Runner(
-        services, Pack.load(PACK), WORKER, timedelta(seconds=0.3), HOSTS, Commands(delay=0.5)
-    )
+    # 1.5s: renewals every 0.5s, well inside the lease even when the run is loaded
+    runner = Runner(services, Pack.load(PACK), WORKER, timedelta(seconds=1.5), HOSTS, until_renewed)
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
-    assert beats and all(b[0] == queued.id and b[1] == WORKER for b in beats)
+    assert beats and all(
+        (b[0], b[1], b[3]) == (queued.id, WORKER, done.lease_generation) for b in beats
+    )
+
+
+def test_a_lost_lease_stops_the_running_command(context: Context) -> None:
+    """A lost lease means Core handed the order to a new claim: the command is signalled at
+    once (its effects outside Core are not fenced), not left to run to its end."""
+    queued = _submit(context, "feeds_cache")
+    services = context.services()
+
+    def lost(*args: Any, lease_generation: int) -> RunOrder:
+        raise ConflictError("reclaimed")
+
+    signalled: list[bool] = []
+
+    def run(command: list[str], cancel: threading.Event) -> subprocess.CompletedProcess[str]:
+        signalled.append(cancel.wait(5))  # the real _run stops the process group here
+        return subprocess.CompletedProcess(command, -15, "", "")
+
+    services.ops.heartbeat = lost  # type: ignore[method-assign]
+    runner = Runner(services, Pack.load(PACK), WORKER, timedelta(seconds=0.3), HOSTS, run)
+    started = time.monotonic()
+    done = runner.claim_once()
+    assert signalled == [True] and time.monotonic() - started < 3
+    assert done is not None and done.id == queued.id and done.state == OrderState.LEASED
+
+
+def test_the_command_runner_stops_the_whole_group_when_cancelled(tmp_path: Path) -> None:
+    """The default runner ends the command and what it started: SIGTERM to its process group,
+    SIGKILL after the grace period."""
+    child = tmp_path / "child.pid"
+    cancel = threading.Event()
+    timer = threading.Timer(0.3, cancel.set)
+    timer.start()
+    started = time.monotonic()
+    done = runner_module._run(["sh", "-c", f"sleep 30 & echo $! > {child}; wait"], cancel)
+    timer.cancel()
+    assert time.monotonic() - started < 5 and done.returncode != 0
+    assert _gone(int(child.read_text())), "the command's own child outlived the cancelled run"
+
+
+def _gone(pid: int) -> bool:
+    """Whether a process has exited. A signalled process its parent has not reaped yet is a
+    zombie that still answers kill(pid, 0); it has stopped all the same."""
+    for _ in range(50):
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        )
+        if not state.stdout.strip() or state.stdout.strip().startswith("Z"):
+            return True
+        time.sleep(0.1)
+    os.kill(pid, 9)
+    return False
+
+
+def test_a_lost_lease_stops_work_the_command_left_running(tmp_path: Path) -> None:
+    """The command exited but left a helper in its group holding its output: a lost lease
+    still stops the helper, not only the (already gone) command."""
+    helper = tmp_path / "helper.pid"
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    started = time.monotonic()
+    runner_module._run(["sh", "-c", f"sleep 30 & echo $! > {helper}; exit 0"], cancel)
+    assert time.monotonic() - started < 5
+    assert _gone(int(helper.read_text())), "the command's background work survived the lost lease"
+
+
+def test_a_lost_lease_kills_group_members_that_ignore_term(tmp_path: Path) -> None:
+    """A member that ignores SIGTERM and holds no output pipe is still stopped: the group gets
+    SIGKILL once the output closes."""
+    helper = tmp_path / "helper.pid"
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    script = (
+        f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & echo $! > {helper}; "
+        "trap 'exit 0' TERM; while :; do sleep 0.1; done"
+    )
+    runner_module._run(["sh", "-c", script], cancel)
+    assert _gone(int(helper.read_text())), "a TERM-ignoring member survived the lost lease"
+
+
+def test_an_interrupted_runner_stops_its_command(tmp_path: Path) -> None:
+    """Ctrl-C (or any error) while the command runs: its own session never saw the runner's
+    signal, so the runner stops the command's group before the interruption propagates."""
+    child = tmp_path / "child.pid"
+    interrupted = threading.Event()
+    threading.Timer(0.3, interrupted.set).start()
+    real_communicate = subprocess.Popen.communicate
+    raised: list[bool] = []
+
+    def communicate(self: subprocess.Popen[str], *args: Any, **kwargs: Any) -> Any:
+        if interrupted.is_set() and not raised:  # Ctrl-C lands once, mid-wait
+            raised.append(True)
+            raise KeyboardInterrupt
+        return real_communicate(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(subprocess.Popen, "communicate", communicate)
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            runner_module._run(
+                ["sh", "-c", f"sleep 30 & echo $! > {child}; wait"], threading.Event()
+            )
+    assert time.monotonic() - started < 5
+    assert _gone(int(child.read_text())), "the interrupted run's child kept running"
+
+
+def test_a_stopped_command_whose_escaped_child_holds_its_output_returns(tmp_path: Path) -> None:
+    """A child that left the command's group (its own setsid) keeps the output pipes open after
+    the command is killed: the runner closes them rather than waiting on it forever."""
+    escaped = tmp_path / "escaped.pid"
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    script = (
+        "import os, subprocess, sys, time\n"
+        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        f"open({str(escaped)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runner_module, "STOP_GRACE", timedelta(seconds=0.5))
+        patch.setattr(runner_module, "DRAIN", timedelta(seconds=0.5))
+        started = time.monotonic()
+        runner_module._run([sys.executable, "-c", script], cancel)
+    try:
+        assert time.monotonic() - started < 5
+    finally:
+        os.kill(int(escaped.read_text()), 9)
+
+
+def test_a_single_shot_claim_exits_on_term() -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli._terminated(signal.SIGTERM, None)
+    assert raised.value.code == 128 + signal.SIGTERM
+
+
+def test_the_command_runner_returns_a_finished_command_unchanged() -> None:
+    done = runner_module._run(["sh", "-c", "echo out; echo err >&2; exit 3"], threading.Event())
+    assert (done.returncode, done.stdout, done.stderr) == (3, "out\n", "err\n")
 
 
 def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
@@ -323,16 +478,31 @@ def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
     services = context.services()
     real = services.ops.heartbeat
 
-    def flaky(*args: Any) -> RunOrder:
+    def flaky(*args: Any, lease_generation: int) -> RunOrder:
         beats.append(args)
         if len(beats) == 1:
             raise sqlite3.OperationalError("database is locked")
-        return real(*args)
+        return real(*args, lease_generation=lease_generation)
 
-    services.ops.heartbeat = flaky  # type: ignore[method-assign]
-    runner = Runner(
-        services, Pack.load(PACK), WORKER, timedelta(seconds=0.3), HOSTS, Commands(delay=0.5)
-    )
+    renewed = threading.Event()
+
+    def until_renewed(
+        command: list[str], cancel: object = None
+    ) -> subprocess.CompletedProcess[str]:
+        # runs until a renewal after the failed one lands (not a fixed sleep: a loaded
+        # parallel run can starve the heartbeat thread for a fixed window)
+        assert renewed.wait(10)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    def flaky_then_renew(*args: Any, lease_generation: int) -> RunOrder:
+        renewal = flaky(*args, lease_generation=lease_generation)
+        renewed.set()
+        return renewal
+
+    services.ops.heartbeat = flaky_then_renew  # type: ignore[method-assign]
+    # 1.5s: renewals every 0.5s, so the failed first one cannot let the lease lapse under a
+    # loaded parallel run before the second lands
+    runner = Runner(services, Pack.load(PACK), WORKER, timedelta(seconds=1.5), HOSTS, until_renewed)
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
     assert len(beats) >= 2 and all(b[0] == queued.id and b[1] == WORKER for b in beats)
@@ -418,6 +588,97 @@ def test_a_real_command_is_run_without_a_shell(context: Context) -> None:
     )
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.DEGRADED
+
+
+def test_old_command_cannot_complete_a_same_worker_reclaim(tmp_path: Path) -> None:
+    class Clock:
+        at = datetime(2026, 1, 1, tzinfo=UTC)
+
+        def now(self) -> datetime:
+            return self.at
+
+    clock = Clock()
+    context = Context(Config(home=tmp_path), clock=clock)
+    order = _submit(context, "feeds_cache")
+    ops = context.services().ops
+    lease = timedelta(minutes=5)
+
+    def reclaim_while_running(
+        command: list[str], cancel: object = None
+    ) -> subprocess.CompletedProcess[str]:
+        clock.at += 2 * lease
+        replacement = ops.claim(WORKER, lease, order_id=order.id)
+        assert replacement is not None and replacement.id == order.id
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    runner = Runner(
+        context.services(), Pack.load(PACK), WORKER, lease, HOSTS, reclaim_while_running
+    )
+    done = runner.claim_once()
+    assert done is not None and done.id == order.id
+    assert order.id is not None
+    current = ops.get(order.id)
+    assert current.state == OrderState.LEASED and current.lease_generation == 2
+
+
+def test_heartbeat_lease_loss_skips_doomed_completion(context: Context) -> None:
+    order = _submit(context, "feeds_cache")
+    services = context.services()
+    completed_calls: list[UUID] = []
+    real_complete = services.ops.complete
+    heartbeat_seen = threading.Event()
+
+    def lose_lease(*args: Any, **kwargs: Any) -> RunOrder:
+        heartbeat_seen.set()
+        raise ConflictError("lease belongs to another worker")
+
+    def record_complete(order_id: UUID, *args: Any, **kwargs: Any) -> RunOrder:
+        completed_calls.append(order_id)
+        return real_complete(order_id, *args, **kwargs)
+
+    services.ops.heartbeat = lose_lease  # type: ignore[method-assign]
+    services.ops.complete = record_complete  # type: ignore[method-assign]
+
+    def wait_for_heartbeat(
+        command: list[str], cancel: object = None
+    ) -> subprocess.CompletedProcess[str]:
+        assert heartbeat_seen.wait(timeout=2.0)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    runner = Runner(
+        services,
+        Pack.load(PACK),
+        WORKER,
+        timedelta(milliseconds=60),
+        HOSTS,
+        wait_for_heartbeat,
+    )
+    done = runner.claim_once()
+    assert done is not None and done.id == order.id
+    assert completed_calls == []
+
+
+def test_reclaimed_order_command_receives_its_generation(context: Context, tmp_path: Path) -> None:
+    queued = _submit(context, "feeds_cache")
+    first = context.services().ops.claim(WORKER, timedelta(seconds=0), order_id=queued.id)
+    assert first is not None
+    receipt = tmp_path / "claim"
+    pack = yaml.safe_load(PACK.read_text())
+    pack["assets"]["feeds_cache"]["run"] = [
+        sys.executable,
+        "-c",
+        "import sys; from pathlib import Path; Path(sys.argv[1]).write_text(' '.join(sys.argv[2:]))",
+        str(receipt),
+        "{run_id}",
+        "{lease_generation}",
+    ]
+    runner = Runner(
+        context.services(), Pack.model_validate(pack), WORKER, timedelta(minutes=5), HOSTS
+    )
+    done = runner.claim_once()
+    assert done is not None and done.state == OrderState.SUCCEEDED and done.id == first.id
+    assert done.lease_generation == first.lease_generation + 1
+    assert receipt.read_text() == f"{first.id} {done.lease_generation}"
 
 
 FEEDS = Path(__file__).parent / "fixtures" / "config" / "feeds.yaml"
@@ -534,9 +795,9 @@ def _order(context: Context, asset: str, repository_id: UUID, priority: int) -> 
 
 def _hold(
     context: Context, order: RunOrder, worker: str, lease_for: timedelta = timedelta(minutes=5)
-) -> None:
+) -> RunOrder:
     """Lease `order` to `worker` without running it, as a runner mid-command would have."""
-    context.services().ops.start(
+    return context.services().ops.start(
         OrderRequest(asset=order.asset, priority=order.priority, repository_id=order.repository_id),
         OPERATOR,
         WorkerId(worker),
@@ -607,11 +868,14 @@ def test_freeing_the_hold_lets_other_runners_claim(
     app = _repository(context)
     held = _order(context, "repo_state", app, priority=0)
     _order(context, "diff_scan", app, priority=1)
-    _hold(
+    held = _hold(
         context, held, "a", timedelta(minutes=5) if free == "complete" else timedelta(seconds=0.1)
     )
     if free == "complete":
-        context.services().ops.complete(held.id, WorkerId("a"), JobResult.succeeded())
+        assert held.id is not None
+        context.services().ops.complete(
+            held.id, WorkerId("a"), JobResult.succeeded(), lease_generation=held.lease_generation
+        )
     else:
         time.sleep(0.3)  # the lease lapses; the claim sweep requeues it
     done = _runner(context, Commands(), worker=WorkerId("b")).claim_once()
@@ -624,7 +888,7 @@ def test_a_repositorys_orders_wait_while_their_holder_runs(context: Context) -> 
     _order(context, "diff_scan", app, priority=1)
     running, gate = threading.Event(), threading.Event()
 
-    def gated(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def gated(command: list[str], cancel: object = None) -> subprocess.CompletedProcess[str]:
         running.set()
         gate.wait()
         return subprocess.CompletedProcess(command, 0, JobResult.succeeded().model_dump_json(), "")
@@ -678,8 +942,11 @@ def test_a_claim_never_recreates_an_order_another_runner_completed(context: Cont
     victim = _order(context, "repo_state", _repository(context, "example/other"), priority=2)
     _hold(context, held, "a")
     services = context.services()
-    services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
-    services.ops.complete(victim.id, WorkerId("a"), JobResult.succeeded())
+    claim = services.ops.claim(WorkerId("a"), timedelta(minutes=5), None, order_id=victim.id)
+    assert claim is not None and claim.id is not None
+    services.ops.complete(
+        claim.id, WorkerId("a"), JobResult.succeeded(), lease_generation=claim.lease_generation
+    )
 
     def no_start(*args: Any, **kw: Any) -> RunOrder:
         raise AssertionError("the runner leases through claim; start would re-create a pair")
@@ -728,3 +995,94 @@ def test_the_claim_loop_stops_on_term(tmp_path: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=10)
+
+
+def test_claim_from_the_cli_reports_lost_lease_without_crashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _core(tmp_path)
+    ctx = Context.from_file(core)
+    order = _submit(ctx, "feeds_cache")
+    assert order.id is not None
+
+    def reclaim_mid_run(
+        command: list[str], cancel: object = None
+    ) -> subprocess.CompletedProcess[str]:
+        ops = Context.from_file(core).services().ops
+        with SqlTraustUnitOfWork(Context.from_file(core).database) as uow:
+            row = uow.run_orders.get(order.id)
+            uow.run_orders.update(
+                row.model_copy(update={"lease_expires_at": datetime(2000, 1, 1, tzinfo=UTC)})
+            )
+            uow.commit()
+        reclaimed = ops.claim(WorkerId("other-worker"), timedelta(minutes=5), order_id=order.id)
+        assert reclaimed is not None and reclaimed.lease_generation == 2
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("traust_engine.ops.runner._run", reclaim_mid_run)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = cli.main(["claim", "--core", str(core), "--pack", str(PACK), "--worker", "w1"])
+    assert rc == cli.LEASE_LOST_EXIT  # retryable: not 2, the startup/operation-error code
+    assert json.loads(out.getvalue()) == {"claimed": str(order.id), "lease_lost": True}
+    current = Context.from_file(core).services().ops.get(order.id)
+    assert current.state == OrderState.LEASED and current.lease_generation == 2
+
+
+def test_claim_loop_survives_lost_lease_and_runs_next_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    core = _core(tmp_path)
+    ctx = Context.from_file(core)
+    first = _submit(ctx, "feeds_cache")
+    second = _submit(ctx, "feeds_cache")
+    assert first.id is not None and second.id is not None
+    calls = 0
+
+    def run_cmd(command: list[str], cancel: object = None) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            ops = Context.from_file(core).services().ops
+            with SqlTraustUnitOfWork(Context.from_file(core).database) as uow:
+                row = uow.run_orders.get(first.id)
+                uow.run_orders.update(
+                    row.model_copy(update={"lease_expires_at": datetime(2000, 1, 1, tzinfo=UTC)})
+                )
+                uow.commit()
+            reclaimed = ops.claim(WorkerId("other-worker"), timedelta(minutes=5), order_id=first.id)
+            assert reclaimed is not None
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr("traust_engine.ops.runner._run", run_cmd)
+    # Stop the loop cleanly after the queue drains ({"claimed": null}).
+    real_wait = threading.Event.wait
+
+    def stop_on_idle(self: threading.Event, timeout: float | None = None) -> bool:
+        if timeout == 60.0:
+            self.set()
+            return True
+        return real_wait(self, timeout)
+
+    monkeypatch.setattr(threading.Event, "wait", stop_on_idle)
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = cli.main(
+            [
+                "claim",
+                "--loop",
+                "--idle",
+                "1m",
+                "--core",
+                str(core),
+                "--pack",
+                str(PACK),
+                "--worker",
+                "w1",
+            ]
+        )
+    assert rc == 0
+    records = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
+    assert records[0] == {"claimed": str(first.id), "lease_lost": True}
+    assert records[1]["id"] == str(second.id) and records[1]["state"] == "succeeded"
+    assert records[2] == {"claimed": None}

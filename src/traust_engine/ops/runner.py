@@ -6,8 +6,11 @@ fetched once per node."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import re
+import signal
 import subprocess
 import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -111,7 +114,7 @@ class Runner:
         worker: WorkerId,
         lease_for: timedelta,
         hosts: Sequence[str],
-        run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+        run: Callable[[list[str], threading.Event], subprocess.CompletedProcess[str]] | None = None,
         labels: Collection[str] = (),
         assets: Collection[AssetName] | None = None,
     ) -> None:
@@ -140,12 +143,12 @@ class Runner:
         lifecycle(log, "lease", "claimed", started=started, level=logging.INFO, count=1)
         spec = self._pack.assets.get(AssetName(order.asset))
         if spec is None:
-            return self._finish(order.id, JobResult.failed(NOT_IN_PACK), started)
+            return self._finish(order, JobResult.failed(NOT_IN_PACK), started)
         try:
             command = argv(spec, self._values(order, spec))
         except (UnresolvedParam, ValueError, TraustError) as error:
             return self._finish(
-                order.id,
+                order,
                 JobResult.failed(BAD_REQUEST),
                 started,
                 error_type=type(error).__name__,
@@ -161,17 +164,18 @@ class Runner:
             )
             raise
         stop = threading.Event()
+        lost = threading.Event()
         context = copy_context()
         beat = threading.Thread(
             target=context.run,
-            args=(self._heartbeat, order.id, stop),
+            args=(self._heartbeat, order.id, order.lease_generation, stop, lost),
             daemon=True,
         )
         beat.start()
         returncode = None
         error_type = None
         try:
-            done = self._run(command)
+            done = self._run(command, lost)  # a lost lease stops the command
             returncode = done.returncode
             result = outcome(done)
         except OSError as error:
@@ -190,8 +194,18 @@ class Runner:
         finally:
             stop.set()
             beat.join()
+        if lost.is_set():
+            lifecycle(
+                log,
+                "execution",
+                "lease_lost",
+                started=started,
+                reason="lease_conflict",
+                returncode=returncode,
+            )
+            return order
         return self._finish(
-            order.id,
+            order,
             result,
             started,
             returncode=returncode,
@@ -200,23 +214,35 @@ class Runner:
 
     def _finish(
         self,
-        order_id: UUID,
+        order: RunOrder,
         result: JobResult,
         started: float,
         *,
         returncode: int | None = None,
         error_type: str | None = None,
     ) -> RunOrder:
-        return complete(
-            self._services.ops,
-            log,
-            order_id,
-            self._worker,
-            result,
-            started,
-            returncode=returncode,
-            error_type=error_type,
-        )
+        try:
+            return complete(
+                self._services.ops,
+                log,
+                order,
+                self._worker,
+                result,
+                started,
+                returncode=returncode,
+                error_type=error_type,
+            )
+        except ConflictError as error:
+            lifecycle(
+                log,
+                "completion",
+                "lease_lost",
+                started=started,
+                reason="lease_conflict",
+                error_type=type(error).__name__,
+                returncode=returncode,
+            )
+            return order
 
     def _lease(self) -> RunOrder | None:
         """Lease the next queued order of an asset this runner makes, most important first.
@@ -240,7 +266,11 @@ class Runner:
         """What the order supplies: its id, the asset's model role, the rule that routed it, and
         its repository's URL for a per-repository asset. NEED(model: order params): typed params
         beyond the repository have no column yet."""
-        values = {"run_id": str(order.id), "worker": str(self._worker)}
+        values = {
+            "run_id": str(order.id),
+            "lease_generation": str(order.lease_generation),
+            "worker": str(self._worker),
+        }
         if spec.model is not None:
             values["role"] = spec.model.role
         if order.rule is not None:
@@ -250,12 +280,17 @@ class Runner:
             values["repo_url"] = str(HttpsRepoUrl.parse(url, self._hosts))
         return values
 
-    def _heartbeat(self, order_id: UUID, stop: threading.Event) -> None:
+    def _heartbeat(
+        self, order_id: UUID, lease_generation: int, stop: threading.Event, lost: threading.Event
+    ) -> None:
         while not stop.wait(self._lease_for.total_seconds() / 3):
             started = perf_counter()
             try:
-                self._services.ops.heartbeat(order_id, self._worker, self._lease_for)
+                self._services.ops.heartbeat(
+                    order_id, self._worker, self._lease_for, lease_generation=lease_generation
+                )
             except ConflictError as error:
+                lost.set()
                 lifecycle(
                     log,
                     "heartbeat",
@@ -278,5 +313,85 @@ class Runner:
                 )
 
 
-def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+# How long a stopped command gets to exit on SIGTERM before SIGKILL, and how long its output
+# may then take to drain before the pipes are closed.
+STOP_GRACE = timedelta(seconds=10)
+DRAIN = timedelta(seconds=5)
+_POLL = 0.5  # seconds between checks of the lost-lease flag while a command runs
+# A command runs in its own process group, so stopping it reaches what it started. Windows
+# has neither sessions nor process groups to signal: there the direct child alone is stopped.
+_GROUPS = hasattr(os, "killpg")
+
+
+def _run(command: list[str], cancel: threading.Event) -> subprocess.CompletedProcess[str]:
+    """Run the command to completion, unless `cancel` is set first: a lost lease means Core has
+    handed the order to a new claim, and Core fences only writes carrying the old generation.
+    Effects outside Core (forge pushes, pull requests, model spend) are not fenced, so the
+    command and everything in its process group are stopped (SIGTERM, then SIGKILL after
+    STOP_GRACE). The command is stopped the same way when this runner is interrupted while it
+    runs (Ctrl-C, a single-shot claim's SIGTERM, an error), because its own session does not
+    receive the runner's terminal or group signals."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=_GROUPS,
+    )
+    try:
+        while not cancel.is_set():
+            try:
+                stdout, stderr = process.communicate(timeout=_POLL)
+            except subprocess.TimeoutExpired:
+                continue
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        stdout, stderr = _stop(process)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    except BaseException:
+        _stop(process)
+        raise
+
+
+def _stop(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Stop the command and everything in its process group, and collect its output.
+
+    The group is signalled whether or not the command itself is still running: work it left
+    behind in the group (a backgrounded helper) is part of the run, and the leader stays
+    unreaped (its PID, and so the group ID, reserved) until the output drains. SIGTERM first;
+    SIGKILL to the whole group after STOP_GRACE, or once the output closes, so a member that
+    ignored SIGTERM and dropped its pipes is stopped too. A process that left the group (its
+    own setsid) cannot be signalled from here; if it still holds the output pipes, they are
+    closed after DRAIN so the caller is never stranded."""
+    _signal(process, hard=False)
+    try:
+        stdout, stderr = process.communicate(timeout=STOP_GRACE.total_seconds())
+    except subprocess.TimeoutExpired:
+        _signal(process, hard=True)
+        try:
+            stdout, stderr = process.communicate(timeout=DRAIN.total_seconds())
+        except subprocess.TimeoutExpired:
+            process.wait(timeout=DRAIN.total_seconds())
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+            return "", ""
+        return stdout, stderr
+    # The output closed within the grace period: what ignored SIGTERM without holding a pipe
+    # is still in the group. The group ID is still reserved while any member lives, and the
+    # leader was reaped only just now.
+    _signal(process, hard=True)
+    return stdout, stderr
+
+
+def _signal(process: subprocess.Popen[str], *, hard: bool) -> None:
+    if not _GROUPS and process.poll() is not None:
+        return  # Windows: no group, and the direct child has exited
+    # ESRCH: already gone. EPERM: on macOS, a group left with only its unreaped (zombie) leader
+    # refuses killpg; nothing in it can still run.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if _GROUPS:
+            os.killpg(process.pid, signal.SIGKILL if hard else signal.SIGTERM)
+        elif hard:
+            process.kill()
+        else:
+            process.terminate()

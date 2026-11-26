@@ -58,7 +58,7 @@ def _execute(
             submitted.id
         )  # core plans a submitted order; the engine's admission tick queues it
         completed = Runner(
-            services, PACK, WORKER, timedelta(minutes=5), (), run=lambda _: done
+            services, PACK, WORKER, timedelta(minutes=5), (), run=lambda *_: done
         ).claim_once()
         assert completed is not None
         return completed
