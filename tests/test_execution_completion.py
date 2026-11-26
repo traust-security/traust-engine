@@ -52,7 +52,11 @@ def _execute(
     )
     request = OrderRequest(asset="feeds_cache", priority=1)
     if mode == "claim":
-        services.ops.submit(request, OPERATOR)
+        submitted = services.ops.submit(request, OPERATOR)
+        assert submitted.id is not None
+        services.ops.admit(
+            submitted.id
+        )  # core plans a submitted order; the engine's admission tick queues it
         completed = Runner(
             services, PACK, WORKER, timedelta(minutes=5), (), run=lambda _: done
         ).claim_once()

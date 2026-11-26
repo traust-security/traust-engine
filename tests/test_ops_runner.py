@@ -100,7 +100,11 @@ def _submit(
         services.portfolio.mark_default_branch(repository.id, GitSha("a" * 40), RefName("main"))
         repository_id = repository.id
     request = OrderRequest(asset=asset, priority=priority, repository_id=repository_id, rule=rule)
-    return services.ops.submit(request, OPERATOR)
+    submitted = services.ops.submit(request, OPERATOR)
+    assert submitted.id is not None
+    return services.ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
 
 
 def _runner(
@@ -487,7 +491,12 @@ def test_a_session_that_answers_its_usage_settles_it_as_the_orders_spend(
 ) -> None:
     core = _core(tmp_path)
     request = OrderRequest(asset="feeds_cache", priority=1, lane=LaneName("full-audit"))
-    queued = Context.from_file(core).services().ops.submit(request, OPERATOR)
+    ops = Context.from_file(core).services().ops
+    submitted = ops.submit(request, OPERATOR)
+    assert submitted.id is not None
+    queued = ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
     answer = JobResult.succeeded().model_copy(update={"usage": (SESSION,)}).model_dump_json()
     monkeypatch.setattr("traust_engine.ops.runner._run", Commands(f"session text\n{answer}"))
     argv = ["claim", "--core", str(core), "--pack", str(PACK)]
@@ -515,7 +524,12 @@ def _repository(context: Context, path: str = "example/app") -> UUID:
 
 def _order(context: Context, asset: str, repository_id: UUID, priority: int) -> RunOrder:
     request = OrderRequest(asset=asset, priority=priority, repository_id=repository_id)
-    return context.services().ops.submit(request, OPERATOR)
+    ops = context.services().ops
+    submitted = ops.submit(request, OPERATOR)
+    assert submitted.id is not None
+    return ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
 
 
 def _hold(

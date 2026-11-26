@@ -10,6 +10,7 @@ tests cover the read)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,7 +38,7 @@ from traust_core.v1.repositories.contract import SqlTraustUnitOfWork
 from traust_core.v1.services.artifact_publishing import AssessmentLog
 
 from traust_engine.ops.controller import ENGINE, RETRY_AFTER, Controller
-from traust_engine.ops.loop import EngineLoop
+from traust_engine.ops.loop import EngineLoop, plan_request
 from traust_engine.ops.pack import Pack
 
 PACK = Path(__file__).parent / "fixtures" / "packs" / "security-source.yaml"
@@ -73,6 +74,10 @@ class FakeFeed:
         )
 
 
+FORK = "https://github.com/mirror-org/patch-remediated"
+FORK_BRANCH = "fix/attempt"
+
+
 class FakeScheduling:
     """Core's scheduling service with the state-report reads answered from memory: the
     trigger's tests drive planning over fixture states keyed by the work item (the
@@ -80,7 +85,8 @@ class FakeScheduling:
     controller asks for. The fold behind the reads is core's own to test; here the
     states are the fixtures."""
 
-    def __init__(self, *states: RemediationState) -> None:
+    def __init__(self, *states: RemediationState, ops: Any = None) -> None:
+        self.ops = ops
         self.by_work_item = {s.work_item_id: s for s in states}
         self.by_repository: dict[UUID, list[RemediationState]] = {}
         for state in states:
@@ -91,6 +97,13 @@ class FakeScheduling:
 
     def states_of(self, repository_id: UUID) -> list[RemediationState]:
         return list(self.by_repository.get(repository_id, ()))
+
+    def reattempt(self, request: OrderRequest, principal: Any, config: Any = ()) -> RunOrder:
+        """The door's stand-in: no real effort backs a fixture work item, so the re-attempt is
+        planned as core's door would plan it (`plan_fix`, with the effort's fork facts).
+        Core#556 tests the door itself."""
+        assert self.ops is not None, "a loop-driven test binds the fake to its services' ops"
+        return self.ops.plan_fix(request, principal, config, FORK, FORK_BRANCH)
 
 
 def _context(tmp_path: Path, clock: Clock, **config: Any) -> Context:
@@ -572,7 +585,9 @@ def test_the_loop_plans_and_admits_what_the_trigger_dispatches(tmp_path: Path) -
     repository, ref = _repository(services)
     assessment = _assessment(context, T0, repository_ref_id=ref)
     state = _state(repository, RemediationStatus.PATCHED, work_item_id=assessment.id)
-    loop = EngineLoop(services, clock, _pack(tmp_path), remediations=FakeScheduling(state))
+    loop = EngineLoop(
+        services, clock, _pack(tmp_path), remediations=FakeScheduling(state, ops=services.ops)
+    )
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
 
     report = loop.run_once()
@@ -596,10 +611,9 @@ def _run(services: Services, order: RunOrder, result: JobResult) -> None:
 
 
 def _queued(services: Services, request: OrderRequest) -> RunOrder:
-    """An order queued as the loop's plan-and-admit would: core's submit door asks a
-    verified principal (a person, or a machine within recording.start), and the engine's
-    own orders go through plan and admit, which no policy gate holds."""
-    order = services.ops.plan(request, ENGINE)
+    """An order queued as the loop's plan-and-admit would: planned by the loop's own
+    `plan_request` (a re-attempt through the fake's stand-in for core's door), then admitted."""
+    order = plan_request(services, request, (), FakeScheduling(ops=services.ops))
     assert order.id is not None
     return services.ops.admit(order.id)
 
@@ -630,6 +644,7 @@ def test_the_cursor_survives_a_planning_failure(tmp_path: Path) -> None:
     states = FakeScheduling(
         _state(first, RemediationStatus.CANDIDATE, work_item_id=first_assessment.id),
         _state(second, RemediationStatus.CANDIDATE, work_item_id=second_assessment.id),
+        ops=services.ops,
     )
     feed = FakeFeed(
         [FeedEvent(assessment=first_assessment), FeedEvent(assessment=second_assessment)],
@@ -639,21 +654,26 @@ def test_the_cursor_survives_a_planning_failure(tmp_path: Path) -> None:
     loop = EngineLoop(services, clock, pack, remediations=states)
     loop._controller._feed = feed  # type: ignore[assignment]
     planned: list[OrderRequest] = []
-    original = services.ops.plan
+    plan, plan_fix = services.ops.plan, services.ops.plan_fix
 
-    def failing(request: OrderRequest, *args: Any, **kwargs: Any) -> Any:
-        if request.asset in ("remediate_finding", "verify_remediation"):
-            if planned:
-                raise RuntimeError("planning failed mid-batch")
-            planned.append(request)
-        return original(request, *args, **kwargs)
+    def failing(original: Callable[..., Any]) -> Callable[..., Any]:
+        def planning(request: OrderRequest, *args: Any, **kwargs: Any) -> Any:
+            if request.asset in ("remediate_finding", "verify_remediation"):
+                if planned:
+                    raise RuntimeError("planning failed mid-batch")
+                planned.append(request)
+            return original(request, *args, **kwargs)
 
-    services.ops.plan = failing  # type: ignore[method-assign]
+        return planning
+
+    # a re-attempt is planned through the door (plan_fix), verification directly (plan)
+    services.ops.plan = failing(plan)  # type: ignore[method-assign]
+    services.ops.plan_fix = failing(plan_fix)  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="mid-batch"):
         loop.run_once()
     assert loop._remediation_cursor is None  # the cursor never advanced past the events
 
-    services.ops.plan = original  # type: ignore[method-assign]
+    services.ops.plan, services.ops.plan_fix = plan, plan_fix  # type: ignore[method-assign]
     report = loop.run_once()
 
     # The second request is retried; the first is not duplicated (its order is open).
@@ -671,7 +691,9 @@ def test_the_shadow_reports_the_remediation_orders_a_pass_would_plan(tmp_path: P
     repository, ref = _repository(services)
     assessment = _assessment(context, T0, repository_ref_id=ref)
     state = _state(repository, RemediationStatus.PATCHED, work_item_id=assessment.id)
-    loop = EngineLoop(services, clock, _pack(tmp_path), remediations=FakeScheduling(state))
+    loop = EngineLoop(
+        services, clock, _pack(tmp_path), remediations=FakeScheduling(state, ops=services.ops)
+    )
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
 
     shadow = loop.shadow_once()
@@ -699,7 +721,7 @@ def test_the_shadow_does_not_consume_deferred_demand(tmp_path: Path) -> None:
     assessment = _assessment(context, T0, repository_ref_id=ref)
     state = _state(repository, RemediationStatus.CANDIDATE, work_item_id=assessment.id)
     pack = _pack(tmp_path)
-    loop = EngineLoop(services, clock, pack, remediations=FakeScheduling(state))
+    loop = EngineLoop(services, clock, pack, remediations=FakeScheduling(state, ops=services.ops))
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
     assert loop.run_once().remediation == 1
     (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
@@ -1152,7 +1174,7 @@ def test_a_wake_survives_a_planning_failure(tmp_path: Path) -> None:
     assessment = _assessment(context, T0, repository_ref_id=ref)
     state = _state(repository, RemediationStatus.CANDIDATE, work_item_id=assessment.id)
     pack = _pack(tmp_path)
-    loop = EngineLoop(services, clock, pack, remediations=FakeScheduling(state))
+    loop = EngineLoop(services, clock, pack, remediations=FakeScheduling(state, ops=services.ops))
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
     assert loop.run_once().remediation == 1
     (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
@@ -1165,18 +1187,18 @@ def test_a_wake_survives_a_planning_failure(tmp_path: Path) -> None:
 
     # The wake's pass dispatches, and planning fails after it: the wake survives.
     loop._controller._feed = FakeFeed([])  # type: ignore[assignment]
-    original = services.ops.plan
+    original = services.ops.plan_fix  # the re-attempt is planned through the door
 
     def failing(request: OrderRequest, *args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("planning failed")
 
-    services.ops.plan = failing  # type: ignore[method-assign]
+    services.ops.plan_fix = failing  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="planning failed"):
         loop.run_once()
     assert loop._controller._deferred  # the wake is still there
 
     # The next pass dispatches it again — no event, no window: its time had come.
-    services.ops.plan = original  # type: ignore[method-assign]
+    services.ops.plan_fix = original  # type: ignore[method-assign]
     assert loop.run_once().remediation == 1
 
 
@@ -1191,7 +1213,7 @@ def test_the_shadow_writes_no_deferral(tmp_path: Path) -> None:
     assessment = _assessment(context, T0, repository_ref_id=ref)
     state = _state(repository, RemediationStatus.CANDIDATE, work_item_id=assessment.id)
     pack = _pack(tmp_path)
-    loop = EngineLoop(services, clock, pack, remediations=FakeScheduling(state))
+    loop = EngineLoop(services, clock, pack, remediations=FakeScheduling(state, ops=services.ops))
     loop._controller._feed = FakeFeed([FeedEvent(assessment=assessment)])  # type: ignore[assignment]
     assert loop.run_once().remediation == 1
     (order,) = [o for o in _orders(services, OrderState.QUEUED) if o.asset == "remediate_finding"]
@@ -1205,3 +1227,40 @@ def test_the_shadow_writes_no_deferral(tmp_path: Path) -> None:
     shadow = loop.shadow_once()
     assert shadow.remediation == ()
     assert loop._controller._deferred == {}
+
+
+def test_plan_request_routes_reattempts_through_the_scheduling_door() -> None:
+    """remediate_finding is door-only (traust-core#541): the loop plans a re-attempt through the
+    scheduling door and every other asset directly, both as the engine with the pack config."""
+
+    calls: list[tuple[str, str]] = []
+
+    class Ops:
+        def plan(self, request: OrderRequest, principal: Any, config: Any) -> str:
+            calls.append(("plan", request.asset))
+            assert principal == ENGINE and config == ("cfg",)
+            return "planned"
+
+    class Doors:
+        def reattempt(self, request: OrderRequest, principal: Any, config: Any) -> str:
+            calls.append(("reattempt", request.asset))
+            assert principal == ENGINE and config == ("cfg",)
+            return "reattempted"
+
+    class FakeServices:
+        ops = Ops()
+        remediation_scheduling = Doors()
+
+    work_item = uuid4()
+    fix = OrderRequest(asset="remediate_finding", priority=1, work_item_id=work_item)
+    verify = OrderRequest(asset="verify_remediation", priority=1, work_item_id=work_item)
+    assert plan_request(FakeServices(), fix, ("cfg",)) == "reattempted"  # type: ignore[arg-type]
+    assert plan_request(FakeServices(), verify, ("cfg",)) == "planned"  # type: ignore[arg-type]
+    assert calls == [("reattempt", "remediate_finding"), ("plan", "verify_remediation")]
+
+    class LoopDoor:  # the loop's own scheduling service wins over the context's
+        def reattempt(self, request: OrderRequest, principal: Any, config: Any) -> str:
+            assert principal == ENGINE and config == ("cfg",)
+            return "loop-door"
+
+    assert plan_request(FakeServices(), fix, ("cfg",), LoopDoor()) == "loop-door"  # type: ignore[arg-type]
