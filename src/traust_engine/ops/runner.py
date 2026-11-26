@@ -6,8 +6,11 @@ fetched once per node."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import re
+import signal
 import subprocess
 import threading
 from collections.abc import Callable, Collection, Mapping, Sequence
@@ -111,7 +114,7 @@ class Runner:
         worker: WorkerId,
         lease_for: timedelta,
         hosts: Sequence[str],
-        run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+        run: Callable[[list[str], threading.Event], subprocess.CompletedProcess[str]] | None = None,
         labels: Collection[str] = (),
         assets: Collection[AssetName] | None = None,
     ) -> None:
@@ -172,7 +175,7 @@ class Runner:
         returncode = None
         error_type = None
         try:
-            done = self._run(command)
+            done = self._run(command, lost)  # a lost lease stops the command
             returncode = done.returncode
             result = outcome(done)
         except OSError as error:
@@ -310,5 +313,41 @@ class Runner:
                 )
 
 
-def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, capture_output=True, text=True, check=False)
+# How long a command whose lease was lost gets to exit on SIGTERM before SIGKILL.
+STOP_GRACE = timedelta(seconds=10)
+_POLL = 0.5  # seconds between checks of the lost-lease flag while a command runs
+
+
+def _run(command: list[str], cancel: threading.Event) -> subprocess.CompletedProcess[str]:
+    """Run the command to completion, unless `cancel` is set first: a lost lease means Core has
+    handed the order to a new claim, and Core fences only writes carrying the old generation.
+    Effects outside Core (forge pushes, pull requests, model spend) are not fenced, so the
+    command and everything it started (its own process group) get SIGTERM, then SIGKILL after
+    STOP_GRACE."""
+    with subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    ) as process:
+        while True:
+            try:
+                stdout, stderr = process.communicate(timeout=_POLL)
+                break
+            except subprocess.TimeoutExpired:
+                if not cancel.is_set():
+                    continue
+            _signal_group(process, signal.SIGTERM)
+            try:
+                stdout, stderr = process.communicate(timeout=STOP_GRACE.total_seconds())
+            except subprocess.TimeoutExpired:
+                _signal_group(process, signal.SIGKILL)
+                stdout, stderr = process.communicate()
+            break
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def _signal_group(process: subprocess.Popen[str], sig: signal.Signals) -> None:
+    with contextlib.suppress(ProcessLookupError):  # already gone
+        os.killpg(process.pid, sig)

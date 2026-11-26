@@ -96,7 +96,7 @@ def test_cli_uses_core_outputs_and_scopes_claimed_execution_without_leaks(
     )  # core plans a submitted order; the engine's admission tick queues it
     assert queued.id is not None
 
-    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], cancel: object = None) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 9, SECRET, SECRET)
 
     monkeypatch.setattr("traust_engine.ops.runner._run", run)
@@ -160,7 +160,7 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
         seen.append(current_correlation())
         raise ConflictError(SECRET)
 
-    def slow(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def slow(command: list[str], cancel: object = None) -> subprocess.CompletedProcess[str]:
         time.sleep(0.08)
         return subprocess.CompletedProcess(command, 0, "", "")
 
@@ -248,7 +248,7 @@ def test_completion_rejection_emits_one_bounded_execution_failure(
     ops.admit(submitted.id)  # core plans a submitted order; the engine's admission tick queues it
     answer = JobResult.partly({SECRET: 1}).model_dump_json()
 
-    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], cancel: object = None) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 4, answer, "")
 
     monkeypatch.setattr("traust_engine.ops.runner._run", run)

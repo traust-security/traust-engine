@@ -421,3 +421,34 @@ def test_which_runs_count_as_remediation_work() -> None:
         assert is_remediation_run(door_shaped)
     assert not is_remediation_run(_run("feeds_cache", T0))
     assert not is_remediation_run(_run("verify_remediation", T0))  # the weekly cadence sweep
+
+
+@pytest.mark.parametrize("starts", [True, False], ids=["command ran", "command could not start"])
+def test_a_recorded_run_reports_its_lost_lease(
+    core: Path, starts: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """complete() leaves a lost lease to its caller: a recorded run reports lease_lost inside
+    its execution scope, and a start failure stays the error raised."""
+    from traust_core.v1.errors import ConflictError
+
+    from traust_engine.ops.shadow import record
+
+    services = Context.from_file(core).services()
+
+    def lost(*args: Any, **kwargs: Any) -> Any:
+        raise ConflictError("reclaimed")
+
+    services.ops.complete = lost  # type: ignore[method-assign]
+    principal = Principal(identity="shadow", kind=ActorKind.MACHINE, display="shadow")
+    argv = _python("pass")[1:] if starts else ["/no/such/command"]
+    caplog.set_level("WARNING", logger="traust_engine.ops.shadow")
+    with pytest.raises(ConflictError if starts else OSError) as raised:
+        record(services, OrderRequest(asset="feeds_cache", priority=1), principal, "w", argv)
+    if not starts:
+        assert isinstance(raised.value.__cause__, ConflictError)
+    events = [
+        (r.operation, r.outcome)  # type: ignore[attr-defined]
+        for r in caplog.records
+        if getattr(r, "operation", "").startswith("engine.")
+    ]
+    assert events == [("engine.completion", "lease_lost")]

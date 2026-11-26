@@ -12,6 +12,7 @@ from time import perf_counter
 from uuid import UUID
 
 from traust_core.v1.context.context import Services
+from traust_core.v1.errors import ConflictError
 from traust_core.v1.models.base import Model
 from traust_core.v1.models.common import every_item
 from traust_core.v1.models.identity import Principal
@@ -103,15 +104,19 @@ def record(
         try:
             done = subprocess.run(list(argv), capture_output=True, text=True, check=False)
         except OSError as error:
-            complete(
-                services.ops,
-                log,
-                order,
-                worker,
-                JobResult.failed(CRASHED),
-                started,
-                error_type=type(error).__name__,
-            )
+            try:
+                complete(
+                    services.ops,
+                    log,
+                    order,
+                    worker,
+                    JobResult.failed(CRASHED),
+                    started,
+                    error_type=type(error).__name__,
+                )
+            except ConflictError as conflict:
+                _lease_lost(started, conflict)
+                raise error from conflict  # the start failure stays the error raised
             raise
         except Exception as error:
             lifecycle(
@@ -124,16 +129,34 @@ def record(
             )
             raise
         result = outcome(done)
-        completed = complete(
-            services.ops,
-            log,
-            order,
-            worker,
-            result,
-            started,
-            returncode=done.returncode,
-        )
+        try:
+            completed = complete(
+                services.ops,
+                log,
+                order,
+                worker,
+                result,
+                started,
+                returncode=done.returncode,
+            )
+        except ConflictError as conflict:
+            _lease_lost(started, conflict, returncode=done.returncode)
+            raise
         return completed, done
+
+
+def _lease_lost(started: float, error: ConflictError, returncode: int | None = None) -> None:
+    """`complete` leaves a lost lease to its caller (never a completion_error): the recorded
+    run reports it here, inside the order's execution scope, before the error leaves it."""
+    lifecycle(
+        log,
+        "completion",
+        "lease_lost",
+        started=started,
+        reason="lease_conflict",
+        error_type=type(error).__name__,
+        returncode=returncode,
+    )
 
 
 def compare_runs(

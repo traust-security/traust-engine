@@ -63,6 +63,9 @@ _EXIT = {
     OrderState.DEGRADED: 4,
     OrderState.REFUSED: 5,
 }
+# A single-shot claim whose lease was lost: retryable, unlike 2 (startup, preflight, operation
+# or usage errors), so a supervisor can tell the two apart from the exit status alone.
+LEASE_LOST_EXIT = 3
 
 
 def _duration(value: str) -> timedelta:
@@ -269,7 +272,7 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
             return 0
         if order.state not in _EXIT:
             print(json.dumps({"claimed": str(order.id), "lease_lost": True}))
-            return 2
+            return LEASE_LOST_EXIT
         print(order.model_dump_json())
         return _EXIT[order.state]
     # The pool's shape: keep claiming while work flows, back off when the queue is
