@@ -88,11 +88,12 @@ def test_cli_uses_core_outputs_and_scopes_claimed_execution_without_leaks(
 ) -> None:
     log_file = tmp_path / "engine.log"
     core_file = _core_file(tmp_path, log_file)
-    queued = (
-        Context.from_file(core_file)
-        .services()
-        .ops.submit(OrderRequest(asset="feeds_cache", priority=1), OPERATOR)
-    )
+    ops = Context.from_file(core_file).services().ops
+    submitted = ops.submit(OrderRequest(asset="feeds_cache", priority=1), OPERATOR)
+    assert submitted.id is not None
+    queued = ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
     assert queued.id is not None
 
     def run(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -147,7 +148,11 @@ def test_heartbeat_thread_inherits_order_correlation_without_exception_text(tmp_
     )
     context.configure_logging("traust_engine")
     services = context.services()
-    queued = services.ops.submit(OrderRequest(asset="feeds_cache", priority=1), OPERATOR)
+    submitted = services.ops.submit(OrderRequest(asset="feeds_cache", priority=1), OPERATOR)
+    assert submitted.id is not None
+    queued = services.ops.admit(
+        submitted.id
+    )  # core plans a submitted order; the engine's admission tick queues it
     assert queued.id is not None
     seen = []
 
@@ -239,9 +244,10 @@ def test_completion_rejection_emits_one_bounded_execution_failure(
 ) -> None:
     log_file = tmp_path / "completion.log"
     core_file = _core_file(tmp_path, log_file)
-    Context.from_file(core_file).services().ops.submit(
-        OrderRequest(asset="feeds_cache", priority=1), OPERATOR
-    )
+    ops = Context.from_file(core_file).services().ops
+    submitted = ops.submit(OrderRequest(asset="feeds_cache", priority=1), OPERATOR)
+    assert submitted.id is not None
+    ops.admit(submitted.id)  # core plans a submitted order; the engine's admission tick queues it
     answer = JobResult.partly({SECRET: 1}).model_dump_json()
 
     def run(command: list[str]) -> subprocess.CompletedProcess[str]:

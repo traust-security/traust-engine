@@ -3,7 +3,7 @@ work, admit."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from typing import Generic, TypeVar
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -12,7 +12,13 @@ from traust_core.v1.context import Clock, Router, Services
 from traust_core.v1.models.base import Model
 from traust_core.v1.models.common import Cursor, every_item
 from traust_core.v1.models.inventory import RecordedRelease, RepositoryFilter
-from traust_core.v1.models.operations import AssetName, OrderRequest
+from traust_core.v1.models.operations import (
+    REMEDIATE_FINDING,
+    AssetName,
+    ConfigDigest,
+    OrderRequest,
+    RunOrder,
+)
 
 from traust_engine.ops.admission import Admission, AdmissionReport
 from traust_engine.ops.controller import ENGINE, Controller, Scheduling, TickReport
@@ -38,6 +44,22 @@ class ShadowReport(Model):
     remediation: tuple[OrderRequest, ...] = ()
 
 
+def plan_request(
+    services: Services,
+    request: OrderRequest,
+    config: Sequence[ConfigDigest] = (),
+    scheduling: Scheduling | None = None,
+) -> RunOrder:
+    """Plan one of the engine's own requests. remediate_finding is door-only (traust-core#541):
+    another attempt of a scheduled effort goes through the scheduling door (the loop's own
+    scheduling service, core's by default), which plans it with the effort's own fork facts;
+    every other asset is planned directly."""
+    if request.asset == REMEDIATE_FINDING:
+        door = services.remediation_scheduling if scheduling is None else scheduling
+        return door.reattempt(request, ENGINE, config)
+    return services.ops.plan(request, ENGINE, config)
+
+
 class EngineLoop(Generic[S]):
     def __init__(
         self,
@@ -51,6 +73,7 @@ class EngineLoop(Generic[S]):
     ) -> None:
         self._services = services
         self._pack = pack
+        self._remediations = remediations
         # `run --asset`: the tick plans, and the pass admits, only the named assets —
         # the rest are left untouched for the engine that was given them.
         selected = None if assets is None else frozenset(assets)
@@ -76,7 +99,7 @@ class EngineLoop(Generic[S]):
             self._remediation_cursor, active=hosts.keys()
         )
         for request in due:
-            self._services.ops.plan(request, ENGINE, self._pack.config())
+            plan_request(self._services, request, self._pack.config(), self._remediations)
         # The cursor advances only once every request is planned: a planning failure
         # retries the unplanned remainder on the next pass, without duplicating the
         # requests that landed (an open or recently attempted order suppresses them).
