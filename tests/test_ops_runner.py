@@ -307,14 +307,25 @@ def test_the_lease_is_renewed_while_the_command_runs(context: Context) -> None:
     services = context.services()
     real = services.ops.heartbeat
 
+    renewed = threading.Event()
+
     def heartbeat(*args: Any, lease_generation: int) -> RunOrder:
         beats.append((*args, lease_generation))
-        return real(*args, lease_generation=lease_generation)
+        renewal = real(*args, lease_generation=lease_generation)
+        if len(beats) >= 2:
+            renewed.set()
+        return renewal
+
+    def until_renewed(
+        command: list[str], cancel: object = None
+    ) -> subprocess.CompletedProcess[str]:
+        # runs until two renewals land, not for a fixed time a loaded parallel run can outlast
+        assert renewed.wait(10)
+        return subprocess.CompletedProcess(command, 0, "", "")
 
     services.ops.heartbeat = heartbeat  # type: ignore[method-assign]
-    runner = Runner(
-        services, Pack.load(PACK), WORKER, timedelta(seconds=0.3), HOSTS, Commands(delay=0.5)
-    )
+    # 1.5s: renewals every 0.5s, well inside the lease even when the run is loaded
+    runner = Runner(services, Pack.load(PACK), WORKER, timedelta(seconds=1.5), HOSTS, until_renewed)
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
     assert beats and all(
@@ -356,16 +367,76 @@ def test_the_command_runner_stops_the_whole_group_when_cancelled(tmp_path: Path)
     done = runner_module._run(["sh", "-c", f"sleep 30 & echo $! > {child}; wait"], cancel)
     timer.cancel()
     assert time.monotonic() - started < 5 and done.returncode != 0
-    pid = int(child.read_text())
-    for _ in range(50):  # the signalled grandchild is reaped by init shortly after
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            break
+    assert _gone(int(child.read_text())), "the command's own child outlived the cancelled run"
+
+
+def _gone(pid: int) -> bool:
+    """Whether a process has exited. A signalled process its parent has not reaped yet is a
+    zombie that still answers kill(pid, 0); it has stopped all the same."""
+    for _ in range(50):
+        state = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True
+        )
+        if not state.stdout.strip() or state.stdout.strip().startswith("Z"):
+            return True
         time.sleep(0.1)
-    else:
-        os.kill(pid, 9)
-        pytest.fail("the command's own child outlived the cancelled run")
+    os.kill(pid, 9)
+    return False
+
+
+def test_an_interrupted_runner_stops_its_command(tmp_path: Path) -> None:
+    """Ctrl-C (or any error) while the command runs: its own session never saw the runner's
+    signal, so the runner stops the command's group before the interruption propagates."""
+    child = tmp_path / "child.pid"
+    interrupted = threading.Event()
+    threading.Timer(0.3, interrupted.set).start()
+    real_communicate = subprocess.Popen.communicate
+    raised: list[bool] = []
+
+    def communicate(self: subprocess.Popen[str], *args: Any, **kwargs: Any) -> Any:
+        if interrupted.is_set() and not raised:  # Ctrl-C lands once, mid-wait
+            raised.append(True)
+            raise KeyboardInterrupt
+        return real_communicate(self, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(subprocess.Popen, "communicate", communicate)
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            runner_module._run(
+                ["sh", "-c", f"sleep 30 & echo $! > {child}; wait"], threading.Event()
+            )
+    assert time.monotonic() - started < 5
+    assert _gone(int(child.read_text())), "the interrupted run's child kept running"
+
+
+def test_a_stopped_command_whose_escaped_child_holds_its_output_returns(tmp_path: Path) -> None:
+    """A child that left the command's group (its own setsid) keeps the output pipes open after
+    the command is killed: the runner closes them rather than waiting on it forever."""
+    escaped = tmp_path / "escaped.pid"
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    script = (
+        "import os, subprocess, sys, time\n"
+        f"p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        f"open({str(escaped)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(60)\n"
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(runner_module, "STOP_GRACE", timedelta(seconds=0.5))
+        patch.setattr(runner_module, "DRAIN", timedelta(seconds=0.5))
+        started = time.monotonic()
+        runner_module._run([sys.executable, "-c", script], cancel)
+    try:
+        assert time.monotonic() - started < 5
+    finally:
+        os.kill(int(escaped.read_text()), 9)
+
+
+def test_a_single_shot_claim_exits_on_term() -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli._terminated(signal.SIGTERM, None)
+    assert raised.value.code == 128 + signal.SIGTERM
 
 
 def test_the_command_runner_returns_a_finished_command_unchanged() -> None:
@@ -403,7 +474,9 @@ def test_a_failed_heartbeat_keeps_renewing_the_lease(context: Context) -> None:
         return renewal
 
     services.ops.heartbeat = flaky_then_renew  # type: ignore[method-assign]
-    runner = Runner(services, Pack.load(PACK), WORKER, timedelta(seconds=0.3), HOSTS, until_renewed)
+    # 1.5s: renewals every 0.5s, so the failed first one cannot let the lease lapse under a
+    # loaded parallel run before the second lands
+    runner = Runner(services, Pack.load(PACK), WORKER, timedelta(seconds=1.5), HOSTS, until_renewed)
     done = runner.claim_once()
     assert done is not None and done.state == OrderState.SUCCEEDED and done.id == queued.id
     assert len(beats) >= 2 and all(b[0] == queued.id and b[1] == WORKER for b in beats)

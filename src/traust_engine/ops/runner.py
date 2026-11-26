@@ -313,41 +313,72 @@ class Runner:
                 )
 
 
-# How long a command whose lease was lost gets to exit on SIGTERM before SIGKILL.
+# How long a stopped command gets to exit on SIGTERM before SIGKILL, and how long its output
+# may then take to drain before the pipes are closed.
 STOP_GRACE = timedelta(seconds=10)
+DRAIN = timedelta(seconds=5)
 _POLL = 0.5  # seconds between checks of the lost-lease flag while a command runs
+# A command runs in its own process group, so stopping it reaches what it started. Windows
+# has neither sessions nor process groups to signal: there the direct child alone is stopped.
+_GROUPS = hasattr(os, "killpg")
 
 
 def _run(command: list[str], cancel: threading.Event) -> subprocess.CompletedProcess[str]:
     """Run the command to completion, unless `cancel` is set first: a lost lease means Core has
     handed the order to a new claim, and Core fences only writes carrying the old generation.
     Effects outside Core (forge pushes, pull requests, model spend) are not fenced, so the
-    command and everything it started (its own process group) get SIGTERM, then SIGKILL after
-    STOP_GRACE."""
-    with subprocess.Popen(
+    command and everything in its process group are stopped (SIGTERM, then SIGKILL after
+    STOP_GRACE). The command is stopped the same way when this runner is interrupted while it
+    runs (Ctrl-C, a single-shot claim's SIGTERM, an error), because its own session does not
+    receive the runner's terminal or group signals."""
+    process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        start_new_session=True,
-    ) as process:
-        while True:
+        start_new_session=_GROUPS,
+    )
+    try:
+        while not cancel.is_set():
             try:
                 stdout, stderr = process.communicate(timeout=_POLL)
-                break
             except subprocess.TimeoutExpired:
-                if not cancel.is_set():
-                    continue
-            _signal_group(process, signal.SIGTERM)
-            try:
-                stdout, stderr = process.communicate(timeout=STOP_GRACE.total_seconds())
-            except subprocess.TimeoutExpired:
-                _signal_group(process, signal.SIGKILL)
-                stdout, stderr = process.communicate()
-            break
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                continue
+            return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        stdout, stderr = _stop(process)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    except BaseException:
+        _stop(process)
+        raise
 
 
-def _signal_group(process: subprocess.Popen[str], sig: signal.Signals) -> None:
-    with contextlib.suppress(ProcessLookupError):  # already gone
-        os.killpg(process.pid, sig)
+def _stop(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Stop the command and what it started, and collect its output. A process that left the
+    group (its own setsid) cannot be signalled from here; if it still holds the output pipes
+    once the command itself is dead, the pipes are closed so the caller is never stranded."""
+    if process.poll() is None:
+        _signal(process, hard=False)
+        try:
+            return process.communicate(timeout=STOP_GRACE.total_seconds())
+        except subprocess.TimeoutExpired:
+            _signal(process, hard=True)
+    try:
+        return process.communicate(timeout=DRAIN.total_seconds())
+    except subprocess.TimeoutExpired:
+        process.wait(timeout=DRAIN.total_seconds())
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        return "", ""
+
+
+def _signal(process: subprocess.Popen[str], *, hard: bool) -> None:
+    # ESRCH: already gone. EPERM: on macOS, a group left with only its unreaped (zombie) leader
+    # refuses killpg; nothing in it can still run.
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if _GROUPS:
+            os.killpg(process.pid, signal.SIGKILL if hard else signal.SIGTERM)
+        elif hard:
+            process.kill()
+        else:
+            process.terminate()

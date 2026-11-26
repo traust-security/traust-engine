@@ -68,6 +68,10 @@ _EXIT = {
 LEASE_LOST_EXIT = 3
 
 
+def _terminated(signum: int, frame: Any) -> None:
+    raise SystemExit(128 + signum)
+
+
 def _duration(value: str) -> timedelta:
     if not (m := _DURATION.match(value)):
         raise argparse.ArgumentTypeError(f"{value!r}: minutes, hours or days, e.g. 15m, 2h, 1d")
@@ -266,6 +270,9 @@ def _claim(args: argparse.Namespace, core: Context, pack: Pack) -> int:
         assets=args.asset or None,
     )
     if not args.loop:
+        # A single-shot claim stops on TERM: the exit unwinds through the runner, which stops
+        # the command it is running (that command's own session never sees this signal).
+        signal.signal(signal.SIGTERM, _terminated)
         order = runner.claim_once()
         if order is None:
             print(json.dumps({"claimed": None}))
