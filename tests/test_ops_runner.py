@@ -384,6 +384,32 @@ def _gone(pid: int) -> bool:
     return False
 
 
+def test_a_lost_lease_stops_work_the_command_left_running(tmp_path: Path) -> None:
+    """The command exited but left a helper in its group holding its output: a lost lease
+    still stops the helper, not only the (already gone) command."""
+    helper = tmp_path / "helper.pid"
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    started = time.monotonic()
+    runner_module._run(["sh", "-c", f"sleep 30 & echo $! > {helper}; exit 0"], cancel)
+    assert time.monotonic() - started < 5
+    assert _gone(int(helper.read_text())), "the command's background work survived the lost lease"
+
+
+def test_a_lost_lease_kills_group_members_that_ignore_term(tmp_path: Path) -> None:
+    """A member that ignores SIGTERM and holds no output pipe is still stopped: the group gets
+    SIGKILL once the output closes."""
+    helper = tmp_path / "helper.pid"
+    cancel = threading.Event()
+    threading.Timer(0.3, cancel.set).start()
+    script = (
+        f"(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & echo $! > {helper}; "
+        "trap 'exit 0' TERM; while :; do sleep 0.1; done"
+    )
+    runner_module._run(["sh", "-c", script], cancel)
+    assert _gone(int(helper.read_text())), "a TERM-ignoring member survived the lost lease"
+
+
 def test_an_interrupted_runner_stops_its_command(tmp_path: Path) -> None:
     """Ctrl-C (or any error) while the command runs: its own session never saw the runner's
     signal, so the runner stops the command's group before the interruption propagates."""

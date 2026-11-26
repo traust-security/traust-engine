@@ -353,26 +353,39 @@ def _run(command: list[str], cancel: threading.Event) -> subprocess.CompletedPro
 
 
 def _stop(process: subprocess.Popen[str]) -> tuple[str, str]:
-    """Stop the command and what it started, and collect its output. A process that left the
-    group (its own setsid) cannot be signalled from here; if it still holds the output pipes
-    once the command itself is dead, the pipes are closed so the caller is never stranded."""
-    if process.poll() is None:
-        _signal(process, hard=False)
-        try:
-            return process.communicate(timeout=STOP_GRACE.total_seconds())
-        except subprocess.TimeoutExpired:
-            _signal(process, hard=True)
+    """Stop the command and everything in its process group, and collect its output.
+
+    The group is signalled whether or not the command itself is still running: work it left
+    behind in the group (a backgrounded helper) is part of the run, and the leader stays
+    unreaped (its PID, and so the group ID, reserved) until the output drains. SIGTERM first;
+    SIGKILL to the whole group after STOP_GRACE, or once the output closes, so a member that
+    ignored SIGTERM and dropped its pipes is stopped too. A process that left the group (its
+    own setsid) cannot be signalled from here; if it still holds the output pipes, they are
+    closed after DRAIN so the caller is never stranded."""
+    _signal(process, hard=False)
     try:
-        return process.communicate(timeout=DRAIN.total_seconds())
+        stdout, stderr = process.communicate(timeout=STOP_GRACE.total_seconds())
     except subprocess.TimeoutExpired:
-        process.wait(timeout=DRAIN.total_seconds())
-        for pipe in (process.stdout, process.stderr):
-            if pipe is not None:
-                pipe.close()
-        return "", ""
+        _signal(process, hard=True)
+        try:
+            stdout, stderr = process.communicate(timeout=DRAIN.total_seconds())
+        except subprocess.TimeoutExpired:
+            process.wait(timeout=DRAIN.total_seconds())
+            for pipe in (process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+            return "", ""
+        return stdout, stderr
+    # The output closed within the grace period: what ignored SIGTERM without holding a pipe
+    # is still in the group. The group ID is still reserved while any member lives, and the
+    # leader was reaped only just now.
+    _signal(process, hard=True)
+    return stdout, stderr
 
 
 def _signal(process: subprocess.Popen[str], *, hard: bool) -> None:
+    if not _GROUPS and process.poll() is not None:
+        return  # Windows: no group, and the direct child has exited
     # ESRCH: already gone. EPERM: on macOS, a group left with only its unreaped (zombie) leader
     # refuses killpg; nothing in it can still run.
     with contextlib.suppress(ProcessLookupError, PermissionError):
