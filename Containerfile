@@ -65,7 +65,7 @@ RUN case "$TARGETARCH" in \
 # Minimal hardened Python runtime. Runs as a non-root user (UID 65532) by
 # default and ships no package manager, so nothing is installed here.
 # Python minor must match the builder stage above (see note there).
-FROM registry.access.redhat.com/hi/python:3.12.16@sha256:73f7e695d5078892861b47067a02b388111bb3009e325cbe8b934a85e0a9cba0
+FROM registry.access.redhat.com/hi/python:3.12.16@sha256:ee183db4fb43716fa1bc7a65e53fd9f82e338217a39e8424974cfb6d360c4fd2
 
 # OCI labels. SOURCE_REVISION and VERSION are supplied by the build.
 ARG SOURCE_REVISION=unknown
